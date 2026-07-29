@@ -1,0 +1,29 @@
+{
+  "name": "puff-qq-bot-platform",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace=@puff/control",
+    "dev:web": "npm run dev --workspace=@puff/web",
+    "dev:agent": "npm run dev --workspace=@puff/agent",
+    "build": "npm run build --workspace=@puff/shared && npm run build --workspace=@puff/web && npm run build --workspace=@puff/control && npm run build --workspace=@puff/agent",
+    "start": "npm run start --workspace=@puff/control",
+    "start:agent": "npm run start --workspace=@puff/agent",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "test:ui": "node scripts/ui-smoke.mjs",
+    "admin:reset": "tsx apps/control/src/tools/reset-admin.ts",
+    "backup": "tsx apps/control/src/tools/backup.ts"
+  },
+  "engines": {
+    "node": ">=20.12"
+  },
+  "devDependencies": {
+    "playwright": "^1.55.1"
+  }
+}

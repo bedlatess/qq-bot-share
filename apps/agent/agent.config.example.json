@@ -1,0 +1,17 @@
+{
+  "nodeId": "node_replace_me",
+  "nodeToken": "replace_with_token_returned_by_admin_panel",
+  "controlUrl": "ws://YOUR_DEBIAN_IP:17866/agent",
+  "spoolDir": "./spool",
+  "spoolLimitBytes": 52428800,
+  "bots": [
+    {
+      "id": "bot_replace_me",
+      "qq": "123456789",
+      "oneBotWs": "ws://127.0.0.1:3001",
+      "webuiUrl": "http://127.0.0.1:6099",
+      "webuiToken": "replace_with_napcat_webui_token"
+    }
+  ]
+}
+

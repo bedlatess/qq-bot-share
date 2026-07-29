@@ -1,0 +1,62 @@
+import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+import { buildApp } from "../apps/control/src/app.js";
+
+test("admin login, CSRF protection and node creation work through HTTP API", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "puff-app-test-"));
+  const app = await buildApp({
+    host: "127.0.0.1",
+    port: 0,
+    dataDir,
+    publicDir: join(dataDir, "missing-public"),
+    publicUrl: "http://127.0.0.1:17866",
+    adminEmail: "admin@example.com",
+    adminPassword: "test-password-123",
+    sessionSecret: "session-secret-at-least-32-characters",
+    masterKey: "master-secret-at-least-32-characters",
+    storageLimitBytes: 100 * 1024 * 1024,
+    logLevel: "silent",
+    isProduction: false,
+  });
+  try {
+    const login = await app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      payload: { email: "admin@example.com", password: "test-password-123" },
+    });
+    assert.equal(login.statusCode, 200);
+    const loginBody = login.json();
+    const cookie = login.headers["set-cookie"]?.split(";")[0];
+    assert.ok(cookie);
+    assert.ok(loginBody.csrf);
+
+    const rejected = await app.inject({
+      method: "POST",
+      url: "/api/nodes",
+      headers: { cookie },
+      payload: { name: "节点A" },
+    });
+    assert.equal(rejected.statusCode, 403);
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/nodes",
+      headers: { cookie, "x-csrf-token": loginBody.csrf },
+      payload: { name: "节点A" },
+    });
+    assert.equal(created.statusCode, 200);
+    assert.match(created.json().data.token, /^[A-Za-z0-9_-]{20,}$/);
+
+    const nodes = await app.inject({
+      method: "GET",
+      url: "/api/nodes",
+      headers: { cookie },
+    });
+    assert.equal(nodes.json().data.length, 1);
+  } finally {
+    await app.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});

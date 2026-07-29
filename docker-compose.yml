@@ -1,0 +1,19 @@
+services:
+  control:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: puff-qq-bot-platform:2.0.0
+    container_name: puff-control
+    restart: unless-stopped
+    env_file:
+      - .env.production
+    ports:
+      - "${PORT:-17866}:17866"
+    volumes:
+      - ./data:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
