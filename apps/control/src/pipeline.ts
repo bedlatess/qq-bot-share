@@ -363,20 +363,46 @@ export class EventPipeline {
     if (currentLicense?.active && userId !== String(bot.qq))
       this.store.recordHumanActivity(botId, groupId);
 
-    if (command === commands.status || command === commands.quota) {
+    if (command === commands.status) {
       this.hub.sendAction(
         botId,
         replyAction(groupId, userId, this.licenseStatus(botId, groupId)),
       );
       return;
     }
+    if (command === commands.quota) {
+      this.hub.sendAction(
+        botId,
+        replyAction(groupId, userId, this.quotaStatus(botId, groupId)),
+      );
+      return;
+    }
     if (command === commands.help) {
+      const customCommands = this.store
+        .listCustomCommands(botId, groupId)
+        .map((item) => String(item.trigger_text).trim())
+        .filter(Boolean);
+      const customHelp = customCommands.length
+        ? `\n\n自定义命令\n${customCommands
+            .slice(0, 8)
+            .map((trigger) => `- ${trigger}`)
+            .join("\n")}${
+            customCommands.length > 8
+              ? `\n- 另有 ${customCommands.length - 8} 条`
+              : ""
+          }`
+        : "";
       this.hub.sendAction(
         botId,
         replyAction(
           groupId,
           userId,
-          `${commands.prefix}${commands.status} | ${commands.prefix}${commands.quota} | ${commands.prefix}${commands.activate} 卡密 | @机器人 ${commands.reset}`,
+          `可用指令\n` +
+            `${commands.prefix}${commands.status}  查看套餐与有效期\n` +
+            `${commands.prefix}${commands.quota}  查看本月剩余额度\n` +
+            `${commands.prefix}${commands.activate} 卡密  激活或续期本群\n` +
+            `@机器人 ${commands.reset}  清除当前会话记忆` +
+            customHelp,
         ),
       );
       return;
@@ -800,18 +826,36 @@ export class EventPipeline {
 
   private licenseStatus(botId: string, groupId: string) {
     const license = this.store.getLicense(botId, groupId);
-    if (!license) return "本群尚未授权，可使用激活指令绑定卡密。";
+    if (!license)
+      return `本群尚未授权\n管理员可发送：${this.commands().prefix}${this.commands().activate} 卡密`;
     const remaining =
       license.monthly_quota <= 0
         ? "不限"
         : Math.max(0, license.monthly_quota - license.usage_count);
-    return `${String(license.plan_name)} | ${license.active ? "有效" : "已到期"} | ${this.expiryText(license)} | 本月剩余 ${remaining} 次`;
+    return (
+      `授权信息\n` +
+      `状态：${license.active ? "正常" : "已到期"}\n` +
+      `套餐：${String(license.plan_name)}\n` +
+      `有效期：${this.expiryText(license)}\n` +
+      `本月额度：${remaining === "不限" ? "不限次数" : `剩余 ${remaining} 次`}`
+    );
+  }
+
+  private quotaStatus(botId: string, groupId: string) {
+    const license = this.store.getLicense(botId, groupId);
+    if (!license)
+      return `本群尚未授权\n管理员可发送：${this.commands().prefix}${this.commands().activate} 卡密`;
+    if (!license.active) return `授权已到期\n有效期：${this.expiryText(license)}`;
+    if (license.monthly_quota <= 0) return "本月额度：不限次数";
+    const used = Math.max(0, Number(license.usage_count));
+    const total = Math.max(0, Number(license.monthly_quota));
+    return `本月额度\n剩余：${Math.max(0, total - used)} 次\n已用：${used} 次\n总计：${total} 次`;
   }
 
   private expiryText(license: Record<string, unknown>) {
     return license.permanent
-      ? "永久授权"
-      : `到期 ${String(license.expires_at).slice(0, 10)}`;
+      ? "永久"
+      : String(license.expires_at).slice(0, 10);
   }
 
   private inCooldown(key: string) {

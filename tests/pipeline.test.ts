@@ -266,6 +266,52 @@ test("custom replies support scoped templates without calling AI", async () => {
   }
 });
 
+test("status, quota, and help commands use readable structured replies", async () => {
+  const fixture = await testStore();
+  try {
+    seedBot(fixture.store, { moderation: false });
+    authorizeGroup(fixture.store);
+    const now = new Date().toISOString();
+    fixture.store.db
+      .prepare(
+        `INSERT INTO custom_commands
+        (id,bot_id,group_id,trigger_text,response_text,match_mode,enabled,created_at,updated_at)
+        VALUES ('cmd_help','bot_1','group_1','群规','查看群公告','exact',1,?,?)`,
+      )
+      .run(now, now);
+    const actions: any[] = [];
+    const pool = {} as any;
+    const pipeline = new EventPipeline(
+      fixture.store,
+      { sendAction: (_botId: string, action: unknown) => actions.push(action) } as any,
+      pool,
+      new Moderator(fixture.store, pool),
+    );
+    const send = (id: string, message: string) =>
+      pipeline.enqueue("bot_1", id, {
+        post_type: "message",
+        message_type: "group",
+        group_id: "group_1",
+        user_id: "10001",
+        message_id: Number(id.slice(-1)),
+        message,
+        sender: { nickname: "小明", role: "member" },
+      });
+
+    await send("command_1", "/授权状态");
+    await send("command_2", "/剩余额度");
+    await send("command_3", "/帮助");
+
+    assert.match(actions[0].params.message[1].data.text, /授权信息\n状态：正常/);
+    assert.match(actions[0].params.message[1].data.text, /套餐：默认专业版/);
+    assert.match(actions[1].params.message[1].data.text, /本月额度\n剩余：3000 次/);
+    assert.match(actions[2].params.message[1].data.text, /可用指令\n\/授权状态/);
+    assert.match(actions[2].params.message[1].data.text, /自定义命令\n- 群规/);
+  } finally {
+    fixture.close();
+  }
+});
+
 test("failed AI calls do not consume group quota", async () => {
   const fixture = await testStore();
   try {

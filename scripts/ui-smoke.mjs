@@ -50,9 +50,9 @@ try {
     path: `${output}/settings-persona-desktop.png`,
     fullPage: true,
   });
-  await page.getByRole("button", { name: "自定义回复" }).click();
-  await page.getByText("静态回复不调用 AI", { exact: false }).waitFor();
-  await page.getByRole("button", { name: "新增回复" }).click();
+  await page.getByRole("button", { name: "自定义命令" }).click();
+  await page.getByText("自定义命令直接返回固定内容", { exact: false }).waitFor();
+  await page.getByRole("button", { name: "新增命令" }).click();
   await page.getByLabel("触发词").fill("群规");
   await page.getByLabel("回复内容").fill("{user}，请先查看群公告。");
   await page.getByRole("button", { name: "保存回复" }).click();

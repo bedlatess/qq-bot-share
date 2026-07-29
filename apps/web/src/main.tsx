@@ -1423,7 +1423,7 @@ function SettingsPage({ notify }: PageProps) {
             [
               ["admins", "全局管理员"],
               ["commands", "内置指令"],
-              ["custom", "自定义回复"],
+              ["custom", "自定义命令"],
               ["persona", "人格与节奏"],
               ["moderation", "平衡审核"],
               ["outbound", "出站过滤"],
@@ -1449,19 +1449,24 @@ function SettingsPage({ notify }: PageProps) {
             />
           )}
           {tab === "commands" && (
-            <ObjectEditor
-              title="群指令"
-              value={settings.data.commands}
-              fields={[
-                ["prefix", "指令前缀"],
-                ["status", "授权状态"],
-                ["quota", "剩余额度"],
-                ["activate", "激活卡密"],
-                ["help", "帮助"],
-                ["reset", "清除记忆"],
-              ]}
-              onSave={(value) => save("commands", value)}
-            />
+            <>
+              <p className="page-note">
+                这里修改系统内置指令的名称；需要新增任意触发词时，请使用“自定义命令”。
+              </p>
+              <ObjectEditor
+                title="群指令"
+                value={settings.data.commands}
+                fields={[
+                  ["prefix", "指令前缀"],
+                  ["status", "授权状态"],
+                  ["quota", "剩余额度"],
+                  ["activate", "激活卡密"],
+                  ["help", "帮助"],
+                  ["reset", "清除记忆"],
+                ]}
+                onSave={(value) => save("commands", value)}
+              />
+            </>
           )}
           {tab === "custom" && <CustomCommandsEditor notify={notify} />}
           {tab === "persona" && (
@@ -1534,7 +1539,7 @@ function CustomCommandsEditor({ notify }: PageProps) {
       setEditing(null);
       setCreating(false);
       await commands.reload();
-      notify("自定义回复已保存");
+      notify("自定义命令已保存");
     } catch (error) {
       notify(message(error), "error");
     }
@@ -1544,12 +1549,12 @@ function CustomCommandsEditor({ notify }: PageProps) {
     <>
       <div className="action-row">
         <p className="page-note">
-          静态回复不调用 AI。回复可使用 {"{user}"}、{"{qq}"}、
+          自定义命令直接返回固定内容，不调用 AI。回复可使用 {"{user}"}、{"{qq}"}、
           {"{group}"}、{"{bot}"}。
         </p>
         <button className="primary" onClick={() => setCreating(true)}>
           <Plus size={16} />
-          新增回复
+          新增命令
         </button>
       </div>
       <div className="table-wrap">
@@ -1584,21 +1589,21 @@ function CustomCommandsEditor({ notify }: PageProps) {
                   <div className="row-actions">
                     <button
                       className="icon-button"
-                      title="编辑回复"
+                      title="编辑命令"
                       onClick={() => setEditing(item)}
                     >
                       <Settings size={16} />
                     </button>
                     <button
                       className="icon-button danger"
-                      title="删除回复"
+                      title="删除命令"
                       onClick={async () => {
                         if (!confirm(`删除触发词“${item.trigger_text}”？`)) return;
                         await api(`/custom-commands/${item.id}`, {
                           method: "DELETE",
                         });
                         await commands.reload();
-                        notify("自定义回复已删除");
+                        notify("自定义命令已删除");
                       }}
                     >
                       <Trash2 size={16} />
@@ -1619,7 +1624,7 @@ function CustomCommandsEditor({ notify }: PageProps) {
       </div>
       {(creating || editing) && (
         <Modal
-          title={editing ? "编辑自定义回复" : "新增自定义回复"}
+          title={editing ? "编辑自定义命令" : "新增自定义命令"}
           onClose={() => {
             setEditing(null);
             setCreating(false);

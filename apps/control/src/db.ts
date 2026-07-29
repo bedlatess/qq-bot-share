@@ -609,6 +609,17 @@ export class Store {
     );
   }
 
+  listCustomCommands(botId: string, groupId: string) {
+    return this.db
+      .prepare(
+        `SELECT * FROM custom_commands
+         WHERE enabled=1 AND (bot_id IS NULL OR bot_id=?)
+           AND (group_id IS NULL OR group_id=?)
+         ORDER BY (bot_id IS NOT NULL)+(group_id IS NOT NULL) DESC,updated_at DESC`,
+      )
+      .all(botId, groupId) as Array<Record<string, unknown>>;
+  }
+
   audit(actor: string, action: string, target?: string, detail: unknown = {}) {
     this.db
       .prepare(
