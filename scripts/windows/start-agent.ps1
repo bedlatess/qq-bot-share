@@ -13,6 +13,33 @@ if ((Test-Path $LogPath) -and (Get-Item $LogPath).Length -gt 20MB) {
 }
 $env:PUFF_AGENT_CONFIG = [System.IO.Path]::GetFullPath($ConfigPath)
 Set-Location $RepoRoot
-& node.exe "apps\agent\dist\main.js" *>> $LogPath
-exit $LASTEXITCODE
+$NodePath = (Get-Command node.exe -ErrorAction Stop).Source
+$EntryPoint = Join-Path $RepoRoot "apps\agent\dist\main.js"
+$DelaySeconds = 2
+
+while ($true) {
+  $StartedAt = Get-Date
+  (
+    "[{0}] supervisor starting agent" -f $StartedAt.ToString("yyyy-MM-dd HH:mm:ss")
+  ) | Out-File -LiteralPath $LogPath -Append
+  try {
+    & $NodePath $EntryPoint *>> $LogPath
+    $ExitCode = if ($null -eq $LASTEXITCODE) { 1 } else { $LASTEXITCODE }
+  } catch {
+    $ExitCode = 1
+    ($_ | Out-String) | Out-File -LiteralPath $LogPath -Append
+  }
+
+  $RuntimeSeconds = [Math]::Round(((Get-Date) - $StartedAt).TotalSeconds, 1)
+  (
+    "[{0}] agent stopped: exit={1}, runtime={2}s; restarting in {3}s" -f `
+      (Get-Date).ToString("yyyy-MM-dd HH:mm:ss"), $ExitCode, $RuntimeSeconds, $DelaySeconds
+  ) | Out-File -LiteralPath $LogPath -Append
+  Start-Sleep -Seconds $DelaySeconds
+  if ($RuntimeSeconds -ge 60) {
+    $DelaySeconds = 2
+  } else {
+    $DelaySeconds = [Math]::Min(30, $DelaySeconds * 2)
+  }
+}
 

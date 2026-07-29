@@ -44,7 +44,11 @@ export class BotConnection {
       if (!result.success || result.data.post_type !== 'message') return;
       const value = `${this.config.id}:${result.data.message_id || ''}:${result.data.time || Date.now()}:${result.data.user_id || ''}`;
       const eventId = createHash('sha256').update(value).digest('hex');
-      this.onEvent(eventId, result.data);
+      try {
+        this.onEvent(eventId, result.data);
+      } catch (error) {
+        console.error(`[bot ${this.config.qq}:event]`, error instanceof Error ? error.stack || error.message : String(error));
+      }
     });
     socket.on('error', (error) => { this.lastError = error.message; });
     socket.on('close', () => {
@@ -55,4 +59,3 @@ export class BotConnection {
     });
   }
 }
-

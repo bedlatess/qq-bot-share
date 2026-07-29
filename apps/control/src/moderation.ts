@@ -70,7 +70,7 @@ export class Moderator {
   ): Promise<string | null> {
     const hard = this.hardCheck(text);
     if (hard) return hard;
-    if (!this.settings().aiReview || text.trim().length < 8) return null;
+    if (!this.settings().aiReview || !this.shouldReviewWithAi(text)) return null;
     const result = await this.pool.chat(
       [
         {
@@ -137,7 +137,7 @@ export class Moderator {
     if (
       !this.settings().nicknameReview ||
       !this.settings().aiReview ||
-      name.trim().length < 3
+      !this.shouldReviewWithAi(name)
     )
       return null;
     const result = await this.pool.chat(
@@ -214,6 +214,24 @@ export class Moderator {
 
   clearContext(botId: string, groupId: string, userId: string) {
     this.windows.delete(`${botId}:${groupId}:${userId}`);
+  }
+
+  private shouldReviewWithAi(text: string) {
+    const value = text.trim();
+    if (value.length < 3) return false;
+    const directRisk =
+      /(博彩|赌博|下注|返利|刷单|跑分|代开发票|色情|约炮|裸聊|收款码|二维码推广)/i;
+    const contact =
+      /(加\s*(我|下|个)?\s*(微信|微|vx|v信|qq|企鹅|电报|tg|telegram)|私聊|联系我|进群|群号|扫码)/i;
+    const promotion =
+      /(出售|低价|优惠|代理|招募|兼职|带你|稳赚|回本|上车|接单|代充|渠道|推广)/i;
+    const identifier =
+      /(?:[a-zA-Z][a-zA-Z0-9_-]{5,}|\d{6,}|https?:\/\/|t\.me\/)/i;
+    return (
+      directRisk.test(value) ||
+      contact.test(value) ||
+      (promotion.test(value) && identifier.test(value))
+    );
   }
 
   record(input: {

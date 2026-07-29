@@ -303,7 +303,7 @@ function Login({
   );
 }
 
-function useData<T>(path: string, initial: T) {
+function useData<T>(path: string, initial: T, refreshMs = 0) {
   const [data, setData] = useState<T>(initial);
   const [loading, setLoading] = useState(true);
   const load = async () => {
@@ -316,12 +316,17 @@ function useData<T>(path: string, initial: T) {
   };
   useEffect(() => {
     void load();
-  }, [path]);
+    if (!refreshMs) return;
+    const timer = window.setInterval(() => {
+      void api<T>(path).then(setData).catch(() => undefined);
+    }, refreshMs);
+    return () => window.clearInterval(timer);
+  }, [path, refreshMs]);
   return { data, loading, reload: load, setData };
 }
 
 function Dashboard({ notify }: PageProps) {
-  const { data, loading, reload } = useData<any>("/dashboard", null);
+  const { data, loading, reload } = useData<any>("/dashboard", null, 15000);
   if (loading || !data) return <Loading />;
   const metrics = [
     ["机器人在线", `${data.bots.online}/${data.bots.total}`, Bot, "green"],
@@ -404,8 +409,8 @@ function Dashboard({ notify }: PageProps) {
 type PageProps = { notify: (text: string, type?: "ok" | "error") => void };
 
 function BotsPage({ notify }: PageProps) {
-  const nodes = useData<any[]>("/nodes", []);
-  const bots = useData<any[]>("/bots", []);
+  const nodes = useData<any[]>("/nodes", [], 15000);
+  const bots = useData<any[]>("/bots", [], 15000);
   const [dialog, setDialog] = useState<"node" | "bot" | null>(null);
   const [secret, setSecret] = useState<any>(null);
   const [qr, setQr] = useState<any>(null);
@@ -728,6 +733,7 @@ function LicensesPage({ notify }: PageProps) {
   const plans = useData<any[]>("/plans", []);
   const bots = useData<any[]>("/bots", []);
   const [dialog, setDialog] = useState<"license" | "plan" | null>(null);
+  const [editingPlan, setEditingPlan] = useState<any>(null);
   const createLicense = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const fd = new FormData(event.currentTarget);
@@ -738,6 +744,9 @@ function LicensesPage({ notify }: PageProps) {
           botId: fd.get("botId"),
           groupId: fd.get("groupId"),
           planId: fd.get("planId"),
+          durationDays: fd.get("durationDays")
+            ? Number(fd.get("durationDays"))
+            : null,
           permanent: fd.get("permanent") === "on",
         }),
       });
@@ -748,7 +757,7 @@ function LicensesPage({ notify }: PageProps) {
       notify(message(e), "error");
     }
   };
-  const createPlan = async (event: React.FormEvent<HTMLFormElement>) => {
+  const savePlan = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const fd = new FormData(event.currentTarget);
     const features = Object.fromEntries(
@@ -763,18 +772,20 @@ function LicensesPage({ notify }: PageProps) {
       ].map((key) => [key, fd.get(key) === "on"]),
     );
     try {
-      await api("/plans", {
-        method: "POST",
+      await api(editingPlan ? `/plans/${editingPlan.id}` : "/plans", {
+        method: editingPlan ? "PUT" : "POST",
         body: JSON.stringify({
           name: fd.get("name"),
           durationDays: Number(fd.get("durationDays")),
           monthlyQuota: Number(fd.get("monthlyQuota")),
           features,
+          enabled: fd.get("enabled") === "on",
         }),
       });
       setDialog(null);
+      setEditingPlan(null);
       await plans.reload();
-      notify("套餐已创建");
+      notify(editingPlan ? "套餐已更新" : "套餐已创建");
     } catch (e) {
       notify(message(e), "error");
     }
@@ -809,6 +820,13 @@ function LicensesPage({ notify }: PageProps) {
               每月 {plan.monthly_quota || "不限"} 次 ·{" "}
               {Object.values(plan.features).filter(Boolean).length} 项功能
             </small>
+            <button
+              className="icon-button"
+              title="编辑套餐"
+              onClick={() => setEditingPlan(plan)}
+            >
+              <Settings size={16} />
+            </button>
           </div>
         ))}
       </div>
@@ -897,6 +915,15 @@ function LicensesPage({ notify }: PageProps) {
                 ))}
               </select>
             </label>
+            <label>
+              本次授权天数
+              <input
+                name="durationDays"
+                type="number"
+                min="1"
+                placeholder="留空跟随套餐；续期会叠加"
+              />
+            </label>
             <label className="check">
               <input type="checkbox" name="permanent" />
               设为永久授权
@@ -905,12 +932,18 @@ function LicensesPage({ notify }: PageProps) {
           </form>
         </Modal>
       )}
-      {dialog === "plan" && (
-        <Modal title="创建套餐" onClose={() => setDialog(null)}>
-          <form onSubmit={createPlan}>
+      {(dialog === "plan" || editingPlan) && (
+        <Modal
+          title={editingPlan ? "编辑套餐" : "创建套餐"}
+          onClose={() => {
+            setDialog(null);
+            setEditingPlan(null);
+          }}
+        >
+          <form onSubmit={savePlan}>
             <label>
               套餐名称
-              <input name="name" required />
+              <input name="name" required defaultValue={editingPlan?.name} />
             </label>
             <div className="form-grid">
               <label>
@@ -919,7 +952,7 @@ function LicensesPage({ notify }: PageProps) {
                   name="durationDays"
                   type="number"
                   min="0"
-                  defaultValue="30"
+                  defaultValue={editingPlan?.duration_days ?? 30}
                 />
               </label>
               <label>
@@ -928,7 +961,7 @@ function LicensesPage({ notify }: PageProps) {
                   name="monthlyQuota"
                   type="number"
                   min="0"
-                  defaultValue="3000"
+                  defaultValue={editingPlan?.monthly_quota ?? 3000}
                 />
               </label>
             </div>
@@ -948,14 +981,29 @@ function LicensesPage({ notify }: PageProps) {
                     <input
                       type="checkbox"
                       name={key}
-                      defaultChecked={key !== "draw" && key !== "privateChat"}
+                      defaultChecked={
+                        editingPlan
+                          ? Boolean(editingPlan.features[key!])
+                          : key !== "draw" && key !== "privateChat"
+                      }
                     />
                     {label}
                   </label>
                 ))}
               </div>
             </fieldset>
-            <Submit text="创建套餐" />
+            {editingPlan && (
+              <label className="check">
+                <input
+                  type="checkbox"
+                  name="enabled"
+                  defaultChecked={editingPlan.enabled}
+                />
+                启用套餐
+              </label>
+            )}
+            {!editingPlan && <input type="hidden" name="enabled" value="on" />}
+            <Submit text={editingPlan ? "保存套餐" : "创建套餐"} />
           </form>
         </Modal>
       )}
@@ -1104,7 +1152,7 @@ function ProvidersPage({ notify }: PageProps) {
     event.preventDefault();
     const fd = new FormData(event.currentTarget);
     try {
-      await api("/providers", {
+      const result = await api<any>("/providers", {
         method: "POST",
         body: JSON.stringify({
           name: fd.get("name"),
@@ -1117,7 +1165,12 @@ function ProvidersPage({ notify }: PageProps) {
       });
       setDialog(false);
       await providers.reload();
-      notify("网关已添加并完成探测");
+      notify(
+        result.probe?.healthy
+          ? `网关可用，延迟 ${result.probe.latencyMs} ms`
+          : `网关已保存，但探测失败：${result.probe?.error || "未知错误"}`,
+        result.probe?.healthy ? "ok" : "error",
+      );
     } catch (e) {
       notify(message(e), "error");
     }
@@ -1195,11 +1248,16 @@ function ProvidersPage({ notify }: PageProps) {
                 title="重新探测"
                 onClick={async () => {
                   try {
-                    await api(`/providers/${provider.id}/probe`, {
+                    const result = await api<any>(`/providers/${provider.id}/probe`, {
                       method: "POST",
                     });
                     await providers.reload();
-                    notify("探测完成");
+                    notify(
+                      result.healthy
+                        ? `网关可用，延迟 ${result.latencyMs} ms`
+                        : `探测失败：${result.error || "未知错误"}`,
+                      result.healthy ? "ok" : "error",
+                    );
                   } catch (e) {
                     notify(message(e), "error");
                   }
@@ -1364,7 +1422,8 @@ function SettingsPage({ notify }: PageProps) {
           {(
             [
               ["admins", "全局管理员"],
-              ["commands", "群指令"],
+              ["commands", "内置指令"],
+              ["custom", "自定义回复"],
               ["persona", "人格与节奏"],
               ["moderation", "平衡审核"],
               ["outbound", "出站过滤"],
@@ -1404,6 +1463,7 @@ function SettingsPage({ notify }: PageProps) {
               onSave={(value) => save("commands", value)}
             />
           )}
+          {tab === "custom" && <CustomCommandsEditor notify={notify} />}
           {tab === "persona" && (
             <ObjectEditor
               title="全局人格默认值"
@@ -1443,6 +1503,193 @@ function SettingsPage({ notify }: PageProps) {
           {tab === "security" && <PasswordEditor notify={notify} />}
         </section>
       </div>
+    </>
+  );
+}
+
+function CustomCommandsEditor({ notify }: PageProps) {
+  const commands = useData<any[]>("/custom-commands", []);
+  const bots = useData<any[]>("/bots", []);
+  const [editing, setEditing] = useState<any>(null);
+  const [creating, setCreating] = useState(false);
+  const save = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const fd = new FormData(event.currentTarget);
+    const payload = {
+      botId: fd.get("botId") || null,
+      groupId: fd.get("groupId") || null,
+      trigger: fd.get("trigger"),
+      response: fd.get("response"),
+      matchMode: fd.get("matchMode"),
+      enabled: fd.get("enabled") === "on",
+    };
+    try {
+      await api(
+        editing ? `/custom-commands/${editing.id}` : "/custom-commands",
+        {
+          method: editing ? "PUT" : "POST",
+          body: JSON.stringify(payload),
+        },
+      );
+      setEditing(null);
+      setCreating(false);
+      await commands.reload();
+      notify("自定义回复已保存");
+    } catch (error) {
+      notify(message(error), "error");
+    }
+  };
+  const current = editing || {};
+  return (
+    <>
+      <div className="action-row">
+        <p className="page-note">
+          静态回复不调用 AI。回复可使用 {"{user}"}、{"{qq}"}、
+          {"{group}"}、{"{bot}"}。
+        </p>
+        <button className="primary" onClick={() => setCreating(true)}>
+          <Plus size={16} />
+          新增回复
+        </button>
+      </div>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>触发词</th>
+              <th>匹配</th>
+              <th>作用范围</th>
+              <th>回复</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {commands.data.map((item) => (
+              <tr key={item.id}>
+                <td>
+                  <span className="mono">{item.trigger_text}</span>
+                  {!item.enabled && <small>已停用</small>}
+                </td>
+                <td>
+                  {{ exact: "完全一致", prefix: "开头匹配", contains: "包含" }[
+                    item.match_mode as "exact"
+                  ] || item.match_mode}
+                </td>
+                <td>
+                  {item.bot_name || "全部机器人"}
+                  <small className="mono">{item.group_id || "全部授权群"}</small>
+                </td>
+                <td className="truncate">{item.response_text}</td>
+                <td>
+                  <div className="row-actions">
+                    <button
+                      className="icon-button"
+                      title="编辑回复"
+                      onClick={() => setEditing(item)}
+                    >
+                      <Settings size={16} />
+                    </button>
+                    <button
+                      className="icon-button danger"
+                      title="删除回复"
+                      onClick={async () => {
+                        if (!confirm(`删除触发词“${item.trigger_text}”？`)) return;
+                        await api(`/custom-commands/${item.id}`, {
+                          method: "DELETE",
+                        });
+                        await commands.reload();
+                        notify("自定义回复已删除");
+                      }}
+                    >
+                      <Trash2 size={16} />
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+            {!commands.data.length && (
+              <tr>
+                <td colSpan={5} className="empty-row">
+                  还没有自定义回复
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      {(creating || editing) && (
+        <Modal
+          title={editing ? "编辑自定义回复" : "新增自定义回复"}
+          onClose={() => {
+            setEditing(null);
+            setCreating(false);
+          }}
+        >
+          <form onSubmit={save}>
+            <label>
+              机器人范围
+              <select name="botId" defaultValue={current.bot_id || ""}>
+                <option value="">全部机器人</option>
+                {bots.data.map((bot) => (
+                  <option value={bot.id} key={bot.id}>
+                    {bot.name} ({bot.qq})
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              指定群号
+              <input
+                name="groupId"
+                inputMode="numeric"
+                defaultValue={current.group_id || ""}
+                placeholder="留空表示全部已授权群"
+              />
+            </label>
+            <div className="form-grid">
+              <label>
+                触发词
+                <input
+                  name="trigger"
+                  required
+                  defaultValue={current.trigger_text || ""}
+                  placeholder="例如：群规"
+                />
+              </label>
+              <label>
+                匹配方式
+                <select
+                  name="matchMode"
+                  defaultValue={current.match_mode || "exact"}
+                >
+                  <option value="exact">完全一致</option>
+                  <option value="prefix">消息开头</option>
+                  <option value="contains">消息包含</option>
+                </select>
+              </label>
+            </div>
+            <label>
+              回复内容
+              <textarea
+                name="response"
+                rows={5}
+                required
+                defaultValue={current.response_text || ""}
+                placeholder="例如：{user}，群规在群公告里，先看置顶消息。"
+              />
+            </label>
+            <label className="check">
+              <input
+                type="checkbox"
+                name="enabled"
+                defaultChecked={editing ? Boolean(current.enabled) : true}
+              />
+              启用这条回复
+            </label>
+            <Submit text="保存回复" />
+          </form>
+        </Modal>
+      )}
     </>
   );
 }
@@ -1576,6 +1823,7 @@ function Status({ value }: { value: string }) {
     unused: "未使用",
     used: "已使用",
     revoked: "已撤销",
+    disabled: "已停用",
   };
   return (
     <CarbonTag

@@ -8,6 +8,10 @@ import type { Store } from "./db.js";
 import type { AgentHub } from "./agent-hub.js";
 import type { ProviderPool } from "./provider-pool.js";
 import type { Moderator } from "./moderation.js";
+import {
+  botDefaultsFallback,
+  type BotDefaults,
+} from "./bot-defaults.js";
 
 type Commands = {
   prefix: string;
@@ -16,23 +20,6 @@ type Commands = {
   activate: string;
   help: string;
   reset: string;
-};
-type BotDefaults = {
-  persona: string;
-  systemPrompt: string;
-  techPrompt: string;
-  lurkPrompt: string;
-  idlePrompt: string;
-  cooldownMs: number;
-  maxHistory: number;
-  lurkMinMessages: number;
-  lurkIntervalSeconds: number;
-  idleEnabled: boolean;
-  idleAfterMinutes: number;
-  idleMaxAttempts: number;
-  activeStartHour: number;
-  activeEndHour: number;
-  activeTimezone: string;
 };
 type HistoryMessage = { role: "user" | "assistant"; content: string };
 type GroupActivity = {
@@ -52,28 +39,6 @@ const commandFallback: Commands = {
   activate: "激活",
   help: "帮助",
   reset: "清除记忆",
-};
-
-const defaultsFallback: BotDefaults = {
-  persona: "泡芙",
-  systemPrompt:
-    "你是一个知识面广、知无不言的QQ群聊搭子。优先直接解决问题，语气自然、机灵、略带俏皮。",
-  techPrompt:
-    "遇到技术问题时，先判断最可能的原因，再给按顺序可执行的解决步骤。",
-  lurkPrompt:
-    "根据近期群聊自然接一句，通常20到60字，不要打断正在解决的问题。",
-  idlePrompt:
-    "群聊冷场时自然发起一个轻量、容易回答的话题，通常20到80字，不催促群友，不@全体成员。",
-  cooldownMs: 10000,
-  maxHistory: 20,
-  lurkMinMessages: 3,
-  lurkIntervalSeconds: 90,
-  idleEnabled: true,
-  idleAfterMinutes: 30,
-  idleMaxAttempts: 2,
-  activeStartHour: 8,
-  activeEndHour: 24,
-  activeTimezone: "Asia/Shanghai",
 };
 
 function extract(message: OneBotEvent["message"]) {
@@ -211,7 +176,7 @@ export class EventPipeline {
       activity.createdAt = now;
       activity.lastSpoke = now;
       try {
-        this.store.consumeQuota(activity.botId, activity.groupId);
+        this.store.assertQuotaAvailable(activity.botId, activity.groupId);
         const transcript = recent
           .map((item) => `${item.name}: ${item.text}`)
           .join("\n");
@@ -230,6 +195,7 @@ export class EventPipeline {
           "text",
           { botId: activity.botId, groupId: activity.groupId, kind: "lurk" },
         );
+        this.store.consumeQuota(activity.botId, activity.groupId);
         const clean = this.cleanOutbound(
           result.text,
           activity.botId,
@@ -289,7 +255,10 @@ export class EventPipeline {
         .join("\n\n");
 
       try {
-        this.store.consumeQuota(engagement.bot_id, engagement.group_id);
+        this.store.assertQuotaAvailable(
+          engagement.bot_id,
+          engagement.group_id,
+        );
         const result = await this.pool.chat(
           [
             {
@@ -309,6 +278,7 @@ export class EventPipeline {
             kind: "idle",
           },
         );
+        this.store.consumeQuota(engagement.bot_id, engagement.group_id);
         const clean = this.cleanOutbound(
           result.text,
           engagement.bot_id,
@@ -534,6 +504,23 @@ export class EventPipeline {
       }
     }
 
+    const customCommand = this.store.matchCustomCommand(botId, groupId, text);
+    if (customCommand) {
+      if (this.inCooldown(`${botId}:${groupId}`)) return;
+      const sender = event.sender?.card || event.sender?.nickname || userId;
+      const response = String(customCommand.response_text)
+        .replaceAll("{user}", () => sender)
+        .replaceAll("{qq}", () => userId)
+        .replaceAll("{group}", () => groupId)
+        .replaceAll("{bot}", () =>
+          String(bot.persona || this.defaults().persona),
+        );
+      const clean = this.cleanOutbound(response, botId, groupId).slice(0, 4000);
+      this.hub.sendAction(botId, replyAction(groupId, userId, clean));
+      this.markSpoke(botId, groupId);
+      return;
+    }
+
     if (text && !text.startsWith(commands.prefix)) {
       this.recordActivity(
         botId,
@@ -567,11 +554,12 @@ export class EventPipeline {
     }
     if (/^(画|生成|绘制|draw)\s*/i.test(text) && license.features.draw) {
       try {
-        this.store.consumeQuota(botId, groupId);
+        this.store.assertQuotaAvailable(botId, groupId);
         const image = await this.pool.image(
           text.replace(/^(画|生成|绘制|draw)\s*/i, ""),
           { botId, groupId },
         );
+        this.store.consumeQuota(botId, groupId);
         const file = image.base64 ? `base64://${image.base64}` : image.url!;
         this.hub.sendAction(botId, {
           action: "send_group_msg",
@@ -598,7 +586,7 @@ export class EventPipeline {
     }
 
     try {
-      this.store.consumeQuota(botId, groupId);
+      this.store.assertQuotaAvailable(botId, groupId);
       const defaults = this.defaults();
       const systemPrompt = this.personaPrompt(
         bot,
@@ -623,6 +611,7 @@ export class EventPipeline {
         images.length ? "vision" : "text",
         { botId, groupId, kind: technical ? "tech" : "chat" },
       );
+      this.store.consumeQuota(botId, groupId);
       const clean = this.cleanOutbound(result.text, botId, groupId).slice(
         0,
         4000,
@@ -774,10 +763,12 @@ export class EventPipeline {
   ) {
     const persona = String(bot.persona || defaults.persona || "泡芙").trim();
     const base = String(
-      bot.system_prompt || defaults.systemPrompt || defaultsFallback.systemPrompt,
+      bot.system_prompt ||
+        defaults.systemPrompt ||
+        botDefaultsFallback.systemPrompt,
     ).trim();
     return [
-      `你的人格名称是“${persona}”。在所有话题和工作模式中保持这个身份与表达风格。`,
+      `你叫“${persona}”。这是内部身份约束，不要向群友复述这句话或介绍人格设定；除非被问到名字，否则不必反复自称。`,
       base,
       modePrompt?.trim(),
     ]
@@ -833,7 +824,7 @@ export class EventPipeline {
 
   private defaults() {
     const value = {
-      ...defaultsFallback,
+      ...botDefaultsFallback,
       ...this.store.getSetting<Partial<BotDefaults>>("bot_defaults", {}),
     };
     const integer = (input: unknown, fallback: number, min: number, max: number) => {

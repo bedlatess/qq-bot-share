@@ -20,7 +20,11 @@ export class Agent {
     for (const item of config.bots) {
       this.bots.set(item.id, new BotConnection(item, (eventId, event) => {
         const message: AgentEvent = { type: 'event', eventId, nodeId: config.nodeId, botId: item.id, event };
-        if (!this.send(message)) this.spool.append(message);
+        try {
+          if (!this.send(message)) this.spool.append(message);
+        } catch (error) {
+          console.error('[spool]', error instanceof Error ? error.stack || error.message : String(error));
+        }
       }));
     }
   }
@@ -71,9 +75,15 @@ export class Agent {
   }
 
   private send(value: unknown) {
-    if (!this.control || this.control.readyState !== WebSocket.OPEN) return false;
-    this.control.send(JSON.stringify(value));
-    return true;
+    const socket = this.control;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+    try {
+      socket.send(JSON.stringify(value));
+      return true;
+    } catch (error) {
+      console.error('[control:send]', error instanceof Error ? error.message : String(error));
+      return false;
+    }
   }
 
   private sendHello() {
@@ -107,4 +117,3 @@ export class Agent {
     }
   }
 }
-

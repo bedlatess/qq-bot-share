@@ -217,13 +217,13 @@ export async function buildApp(config: AppConfig) {
         nodes: {
           total: scalar("SELECT COUNT(*) count FROM nodes"),
           online: scalar(
-            "SELECT COUNT(*) count FROM nodes WHERE status='online'",
+            "SELECT COUNT(*) count FROM nodes WHERE status='online' AND julianday(last_seen_at)>=julianday('now','-45 seconds')",
           ),
         },
         bots: {
           total: scalar("SELECT COUNT(*) count FROM bots"),
           online: scalar(
-            "SELECT COUNT(*) count FROM bots WHERE status='online'",
+            "SELECT COUNT(*) count FROM bots WHERE status='online' AND julianday(last_seen_at)>=julianday('now','-45 seconds')",
           ),
         },
         licenses: {
@@ -255,6 +255,7 @@ export async function buildApp(config: AppConfig) {
   registerLicenseRoutes(app, store);
   registerCardRoutes(app, store);
   registerProviderRoutes(app, store, pool, config.masterKey);
+  registerCustomCommandRoutes(app, store);
   registerSettingsRoutes(app, store);
   registerLogRoutes(app, store, storage);
 
@@ -317,15 +318,21 @@ function sameOrigin(
 }
 
 function registerNodeRoutes(app: any, store: Store) {
-  app.get("/api/nodes", async () => ({
-    ok: true,
-    data: store.db
+  app.get("/api/nodes", async () => {
+    const rows = store.db
       .prepare(
         `SELECT n.*,
     (SELECT COUNT(*) FROM bots b WHERE b.node_id=n.id) bot_count FROM nodes n ORDER BY n.created_at DESC`,
       )
-      .all(),
-  }));
+      .all() as any[];
+    return {
+      ok: true,
+      data: rows.map((row) => ({
+        ...row,
+        status: effectivePresence(row.status, row.last_seen_at),
+      })),
+    };
+  });
   app.post("/api/nodes", async (request: any) => {
     const body = z
       .object({ name: z.string().min(1).max(80) })
@@ -338,7 +345,10 @@ function registerNodeRoutes(app: any, store: Store) {
       )
       .run(id, body.name.trim(), sha256(token), nowIso());
     store.audit(`admin:${request.admin.email}`, "node.create", id);
-    return { ok: true, data: { id, name: body.name.trim(), token } };
+    return {
+      ok: true,
+      data: { nodeId: id, nodeToken: token, name: body.name.trim() },
+    };
   });
   app.delete("/api/nodes/:id", async (request: any) => {
     const id = z.string().parse(request.params.id);
@@ -369,6 +379,7 @@ function registerBotRoutes(app: any, store: Store, hub: AgentHub) {
         .all() as any[]
     ).map((row) => ({
       ...row,
+      status: effectivePresence(row.status, row.last_seen_at),
       enabled: boolean(row.enabled),
       settings: parseJson(row.settings_json),
     })),
@@ -451,6 +462,15 @@ function registerBotRoutes(app: any, store: Store, hub: AgentHub) {
       data: await hub.requestNapCat(request.params.id, operation),
     }));
   }
+}
+
+function effectivePresence(status: unknown, lastSeenAt: unknown) {
+  const seen = Date.parse(String(lastSeenAt || ""));
+  return status === "online" &&
+    Number.isFinite(seen) &&
+    Date.now() - seen < 45_000
+    ? "online"
+    : "offline";
 }
 
 function registerPlanRoutes(app: any, store: Store) {
@@ -748,6 +768,93 @@ function registerProviderRoutes(
     store.db
       .prepare("DELETE FROM ai_providers WHERE id=?")
       .run(request.params.id);
+    return { ok: true };
+  });
+}
+
+function registerCustomCommandRoutes(app: any, store: Store) {
+  const commandSchema = z.object({
+    botId: z.string().nullable().default(null),
+    groupId: z
+      .union([z.string().regex(/^\d{5,15}$/), z.literal(""), z.null()])
+      .default(null),
+    trigger: z.string().trim().min(1).max(200),
+    response: z.string().trim().min(1).max(4000),
+    matchMode: z.enum(["exact", "prefix", "contains"]).default("exact"),
+    enabled: z.boolean().default(true),
+  });
+  const publicRows = () =>
+    store.db
+      .prepare(
+        `SELECT c.*,b.name bot_name,b.qq bot_qq
+         FROM custom_commands c LEFT JOIN bots b ON b.id=c.bot_id
+         ORDER BY c.updated_at DESC`,
+      )
+      .all();
+
+  app.get("/api/custom-commands", async () => ({
+    ok: true,
+    data: publicRows(),
+  }));
+  app.post("/api/custom-commands", async (request: any) => {
+    const body = commandSchema.parse(request.body);
+    const id = randomId("cmd_");
+    const now = nowIso();
+    store.db
+      .prepare(
+        `INSERT INTO custom_commands
+         (id,bot_id,group_id,trigger_text,response_text,match_mode,enabled,created_at,updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?)`,
+      )
+      .run(
+        id,
+        body.botId || null,
+        body.groupId || null,
+        body.trigger,
+        body.response,
+        body.matchMode,
+        body.enabled ? 1 : 0,
+        now,
+        now,
+      );
+    store.audit(`admin:${request.admin.email}`, "custom_command.create", id);
+    return { ok: true, data: { id } };
+  });
+  app.put("/api/custom-commands/:id", async (request: any) => {
+    const body = commandSchema.parse(request.body);
+    const result = store.db
+      .prepare(
+        `UPDATE custom_commands SET bot_id=?,group_id=?,trigger_text=?,response_text=?,
+         match_mode=?,enabled=?,updated_at=? WHERE id=?`,
+      )
+      .run(
+        body.botId || null,
+        body.groupId || null,
+        body.trigger,
+        body.response,
+        body.matchMode,
+        body.enabled ? 1 : 0,
+        nowIso(),
+        request.params.id,
+      );
+    if (!result.changes)
+      throw Object.assign(new Error("自定义命令不存在"), { statusCode: 404 });
+    store.audit(
+      `admin:${request.admin.email}`,
+      "custom_command.update",
+      request.params.id,
+    );
+    return { ok: true };
+  });
+  app.delete("/api/custom-commands/:id", async (request: any) => {
+    store.db
+      .prepare("DELETE FROM custom_commands WHERE id=?")
+      .run(request.params.id);
+    store.audit(
+      `admin:${request.admin.email}`,
+      "custom_command.delete",
+      request.params.id,
+    );
     return { ok: true };
   });
 }

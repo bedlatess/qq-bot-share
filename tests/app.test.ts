@@ -47,7 +47,7 @@ test("admin login, CSRF protection and node creation work through HTTP API", asy
       payload: { name: "节点A" },
     });
     assert.equal(created.statusCode, 200);
-    assert.match(created.json().data.token, /^[A-Za-z0-9_-]{20,}$/);
+    assert.match(created.json().data.nodeToken, /^[A-Za-z0-9_-]{20,}$/);
 
     const nodes = await app.inject({
       method: "GET",
@@ -55,6 +55,61 @@ test("admin login, CSRF protection and node creation work through HTTP API", asy
       headers: { cookie },
     });
     assert.equal(nodes.json().data.length, 1);
+    assert.ok(created.json().data.nodeId);
+    assert.ok(created.json().data.nodeToken);
+    assert.equal(created.json().data.id, undefined);
+
+    app.puff.store.db
+      .prepare("UPDATE nodes SET status='online',last_seen_at=?")
+      .run(new Date(Date.now() - 60_000).toISOString());
+    const staleDashboard = await app.inject({
+      method: "GET",
+      url: "/api/dashboard",
+      headers: { cookie },
+    });
+    assert.equal(staleDashboard.json().data.nodes.online, 0);
+    app.puff.store.db
+      .prepare("UPDATE nodes SET last_seen_at=?")
+      .run(new Date().toISOString());
+    const freshDashboard = await app.inject({
+      method: "GET",
+      url: "/api/dashboard",
+      headers: { cookie },
+    });
+    assert.equal(freshDashboard.json().data.nodes.online, 1);
+
+    const bot = await app.inject({
+      method: "POST",
+      url: "/api/bots",
+      headers: { cookie, "x-csrf-token": loginBody.csrf },
+      payload: {
+        nodeId: created.json().data.nodeId,
+        qq: "123456789",
+        name: "测试机器人",
+      },
+    });
+    assert.equal(bot.statusCode, 200);
+    const custom = await app.inject({
+      method: "POST",
+      url: "/api/custom-commands",
+      headers: { cookie, "x-csrf-token": loginBody.csrf },
+      payload: {
+        botId: bot.json().data.id,
+        groupId: null,
+        trigger: "群规",
+        response: "请看群公告",
+        matchMode: "exact",
+        enabled: true,
+      },
+    });
+    assert.equal(custom.statusCode, 200);
+    const customRows = await app.inject({
+      method: "GET",
+      url: "/api/custom-commands",
+      headers: { cookie },
+    });
+    assert.equal(customRows.json().data.length, 1);
+    assert.equal(customRows.json().data[0].trigger_text, "群规");
   } finally {
     await app.close();
     rmSync(dataDir, { recursive: true, force: true });

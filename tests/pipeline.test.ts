@@ -130,6 +130,47 @@ test("outbound filter masks configured secrets", async () => {
   }
 });
 
+test("balanced moderation skips ordinary chat before calling AI", async () => {
+  const fixture = await testStore();
+  try {
+    fixture.store.setSetting("moderation", {
+      mode: "balanced",
+      action: "recall",
+      muteSeconds: 600,
+      hardKeywords: [],
+      hardPatterns: [],
+      aiReview: true,
+      imageReview: true,
+      contextReview: true,
+      nicknameReview: true,
+    });
+    let calls = 0;
+    const pool = {
+      chat: async () => {
+        calls += 1;
+        return {
+          text: '{"violation":true,"reason":"推广"}',
+          providerId: "fake",
+        };
+      },
+    } as any;
+    const moderator = new Moderator(fixture.store, pool);
+
+    assert.equal(
+      await moderator.reviewText("这个 Docker 日志应该怎么看？", "bot_1", "group_1"),
+      null,
+    );
+    assert.equal(calls, 0);
+    assert.equal(
+      await moderator.reviewText("低价代理上车，加我微信 abcdef", "bot_1", "group_1"),
+      "推广",
+    );
+    assert.equal(calls, 1);
+  } finally {
+    fixture.close();
+  }
+});
+
 test("technical replies retain bot persona and base prompt", async () => {
   const fixture = await testStore();
   try {
@@ -169,9 +210,94 @@ test("technical replies retain bot persona and base prompt", async () => {
     });
 
     assert.equal(actions.length, 1);
-    assert.match(systemPrompt, /人格名称是“小泡”/);
+    assert.match(systemPrompt, /你叫“小泡”/);
+    assert.match(systemPrompt, /内部身份约束/);
     assert.match(systemPrompt, /机器人专属基础人格/);
     assert.match(systemPrompt, /技术附加规则/);
+  } finally {
+    fixture.close();
+  }
+});
+
+test("custom replies support scoped templates without calling AI", async () => {
+  const fixture = await testStore();
+  try {
+    seedBot(fixture.store, { moderation: false });
+    authorizeGroup(fixture.store);
+    const now = new Date().toISOString();
+    fixture.store.db
+      .prepare(
+        `INSERT INTO custom_commands
+        (id,bot_id,group_id,trigger_text,response_text,match_mode,enabled,created_at,updated_at)
+        VALUES ('cmd_1','bot_1','group_1','群规','{user}，群规在群公告。','exact',1,?,?)`,
+      )
+      .run(now, now);
+    let aiCalls = 0;
+    const pool = {
+      chat: async () => {
+        aiCalls += 1;
+        return { text: "不应调用", providerId: "fake" };
+      },
+    } as any;
+    const actions: any[] = [];
+    const pipeline = new EventPipeline(
+      fixture.store,
+      { sendAction: (_botId: string, action: unknown) => actions.push(action) } as any,
+      pool,
+      new Moderator(fixture.store, pool),
+    );
+
+    await pipeline.enqueue("bot_1", "custom_1", {
+      post_type: "message",
+      message_type: "group",
+      group_id: "group_1",
+      user_id: "10001",
+      message_id: 10,
+      message: "群规",
+      sender: { nickname: "小明", role: "member" },
+    });
+
+    assert.equal(aiCalls, 0);
+    assert.equal(actions.length, 1);
+    assert.equal(actions[0].params.message[1].data.text, " 小明，群规在群公告。");
+    assert.equal(fixture.store.getLicense("bot_1", "group_1")?.usage_count, 0);
+  } finally {
+    fixture.close();
+  }
+});
+
+test("failed AI calls do not consume group quota", async () => {
+  const fixture = await testStore();
+  try {
+    seedBot(fixture.store, { moderation: false, chat: true });
+    authorizeGroup(fixture.store);
+    fixture.store.setSetting("bot_defaults", engagementSettings());
+    const pool = {
+      chat: async () => {
+        throw new Error("全部模型网关失败");
+      },
+    } as any;
+    const actions: any[] = [];
+    const pipeline = new EventPipeline(
+      fixture.store,
+      { sendAction: (_botId: string, action: unknown) => actions.push(action) } as any,
+      pool,
+      new Moderator(fixture.store, pool),
+    );
+
+    await pipeline.enqueue("bot_1", "failed_ai_1", {
+      post_type: "message",
+      message_type: "group",
+      group_id: "group_1",
+      user_id: "10001",
+      message_id: 11,
+      message: [{ type: "at", data: { qq: "123456789" } }, { type: "text", data: { text: "在吗" } }],
+      sender: { nickname: "小明", role: "member" },
+    });
+
+    assert.equal(actions.length, 1);
+    assert.match(actions[0].params.message[1].data.text, /全部模型网关失败/);
+    assert.equal(fixture.store.getLicense("bot_1", "group_1")?.usage_count, 0);
   } finally {
     fixture.close();
   }

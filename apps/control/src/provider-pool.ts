@@ -51,6 +51,10 @@ export class ProviderPool {
     const candidates = this.providers(task);
     if (candidates.length === 0) throw new Error(`没有可用的${task === 'vision' ? '视觉' : '文本'}模型网关`);
     const errors: string[] = [];
+    const moderation = context.kind.includes('moderation');
+    const shortReply = context.kind === 'chat' || context.kind === 'lurk' || context.kind === 'idle';
+    const maxTokens = moderation ? 256 : shortReply ? 768 : 2048;
+    const temperature = moderation ? 0.1 : context.kind === 'tech' ? 0.35 : 0.75;
     for (const provider of candidates) {
       const started = Date.now();
       try {
@@ -62,7 +66,7 @@ export class ProviderPool {
             'content-type': 'application/json',
             authorization: `Bearer ${decryptSecret(provider.api_key_enc, this.masterKey)}`,
           },
-          body: JSON.stringify({ model: provider.model, messages, max_tokens: 2048, temperature: 0.7 }),
+          body: JSON.stringify({ model: provider.model, messages, max_tokens: maxTokens, temperature }),
           signal: controller.signal,
         }).finally(() => clearTimeout(timer));
         if (!response.ok) {
@@ -162,4 +166,3 @@ export class ProviderPool {
       last_error=?,updated_at=? WHERE id=?`).run(failures, cooldown, message.slice(0, 500), nowIso(), provider.id);
   }
 }
-

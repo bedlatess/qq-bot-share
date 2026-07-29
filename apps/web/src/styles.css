@@ -355,14 +355,21 @@ a:focus-visible {
 }
 
 .plan-summary {
+  position: relative;
   min-height: 116px;
-  padding: 18px;
+  padding: 18px 56px 18px 18px;
   display: grid;
   align-content: space-between;
   gap: 6px;
   background: var(--surface);
   border-right: 1px solid var(--line);
   border-bottom: 1px solid var(--line);
+}
+
+.plan-summary > .icon-button {
+  position: absolute;
+  top: 12px;
+  right: 12px;
 }
 
 .plan-summary span,
@@ -693,6 +700,12 @@ pre {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.empty-row {
+  padding: 32px 16px;
+  color: var(--muted-2);
+  text-align: center;
 }
 
 .status-tag.cds--tag {
