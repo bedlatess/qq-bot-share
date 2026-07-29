@@ -244,6 +244,32 @@ docker compose logs --tail=100 control
 
 恢复时停止容器，将备份复制为 `data/puff.sqlite` 后重新启动。操作前同时删除旧的 `puff.sqlite-wal` 和 `puff.sqlite-shm`。
 
+### GitHub 自动更新
+
+项目关联 `main` 分支后，可安装轻量 systemd 定时器。它每 5 分钟检查一次远端；没有新提交时立即退出，有更新时依次执行 SQLite 备份、fast-forward 拉取、Docker 构建、容器更新和健康检查。
+
+```bash
+cd /root/data/docker_data/puff
+chmod 750 scripts/linux/*.sh
+bash scripts/linux/install-auto-update.sh /root/data/docker_data/puff
+```
+
+查看状态和日志：
+
+```bash
+systemctl status puff-auto-update.timer --no-pager
+journalctl -u puff-auto-update.service -n 100 --no-pager
+```
+
+立即手工检查并更新：
+
+```bash
+cd /root/data/docker_data/puff
+bash scripts/linux/update.sh
+```
+
+本地开发完成后保持工作区测试通过，再执行 `git add`、`git commit` 和 `git push origin main`。服务器将在下一次定时检查时自动部署。
+
 ## 八、本地开发与验收
 
 需要 Node.js 20.12+：
