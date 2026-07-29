@@ -27,8 +27,14 @@ COPY --from=build /app/apps/control/dist apps/control/dist
 COPY --from=build /app/apps/control/public apps/control/public
 COPY --from=build /app/packages/shared/package.json packages/shared/package.json
 COPY --from=build /app/packages/shared/dist packages/shared/dist
-RUN mkdir -p /app/data && chown -R node:node /app/data
+RUN chmod 0644 package.json package-lock.json \
+      apps/control/package.json apps/agent/package.json apps/web/package.json \
+      packages/shared/package.json \
+    && chmod -R a+rX apps/control/dist apps/control/public packages/shared/dist \
+    && mkdir -p /app/data \
+    && chown -R node:node /app/data
 USER node
+RUN node -e "import('@puff/shared').then(() => console.log('shared package ok'))"
 EXPOSE 17866
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:17866/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
