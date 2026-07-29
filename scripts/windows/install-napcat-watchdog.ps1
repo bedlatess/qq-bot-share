@@ -17,7 +17,7 @@ if (-not (Test-Path -LiteralPath $StartScript)) {
   throw "NapCat 启动脚本不存在：$StartScript"
 }
 $watchScript = Join-Path $PSScriptRoot "watch-napcat.ps1"
-$arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$watchScript`" -StartScript `"$StartScript`" -OneBotPort $OneBotPort"
+$arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$watchScript`" -StartScript `"$StartScript`" -OneBotPort $OneBotPort"
 $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $arguments -WorkingDirectory (Split-Path -Parent $StartScript)
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $identity.Name
 $settings = New-ScheduledTaskSettingsSet -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -StartWhenAvailable -MultipleInstances IgnoreNew
