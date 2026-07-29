@@ -105,7 +105,7 @@ test("authorized group activity triggers a quota-bound proactive reply", async (
         sender: { nickname: `成员${index + 1}`, role: "member" },
       });
     }
-    await pipeline.tick(started + 45_000);
+    await pipeline.tick(started + 5_001);
     assert.equal(actions.length, 1);
     assert.equal(actions[0].action, "send_group_msg");
     assert.equal(actions[0].params.message, "自然插话");

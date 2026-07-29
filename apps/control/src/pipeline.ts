@@ -164,7 +164,7 @@ export class EventPipeline {
       const quietThreshold = Math.max(2, defaults.lurkQuietSeconds || 5) * 1000;
       if (quietFor < quietThreshold || quietFor > 5 * 60 * 1000) continue;
       const interval = Math.max(30, defaults.lurkIntervalSeconds || 45) * 1000;
-      if (now - Math.max(activity.lastSpoke, activity.createdAt) < interval)
+      if (activity.lastSpoke > 0 && now - activity.lastSpoke < interval)
         continue;
       const license = this.store.getLicense(activity.botId, activity.groupId);
       if (!license?.active || !license.features.lurk) continue;
