@@ -37,7 +37,9 @@ function engagementSettings(overrides: Record<string, unknown> = {}) {
     idlePrompt: "冷场起话题规则",
     cooldownMs: 0,
     maxHistory: 10,
+    lurkEnabled: true,
     lurkMinMessages: 3,
+    lurkQuietSeconds: 3,
     lurkIntervalSeconds: 30,
     idleEnabled: true,
     idleAfterMinutes: 1,
@@ -76,7 +78,9 @@ test("authorized group activity triggers a quota-bound proactive reply", async (
       lurkPrompt: "lurk",
       cooldownMs: 0,
       maxHistory: 10,
-      lurkMinMessages: 3,
+      lurkEnabled: true,
+      lurkMinMessages: 2,
+      lurkQuietSeconds: 3,
       lurkIntervalSeconds: 30,
     });
 
@@ -90,7 +94,7 @@ test("authorized group activity triggers a quota-bound proactive reply", async (
     const moderator = new Moderator(fixture.store, pool);
     const pipeline = new EventPipeline(fixture.store, hub, pool, moderator);
     const started = Date.now();
-    for (let index = 0; index < 3; index += 1) {
+    for (let index = 0; index < 2; index += 1) {
       await pipeline.enqueue("bot_1", `event_${index}`, {
         post_type: "message",
         message_type: "group",

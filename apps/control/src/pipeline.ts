@@ -156,12 +156,14 @@ export class EventPipeline {
   }
 
   private async tickRecentActivity(now: number, defaults: BotDefaults) {
+    if (!defaults.lurkEnabled) return;
     for (const activity of this.activities.values()) {
-      if (activity.messages.length < Math.max(2, defaults.lurkMinMessages || 3))
+      if (activity.messages.length < Math.max(2, defaults.lurkMinMessages || 2))
         continue;
       const quietFor = now - activity.lastAt;
-      if (quietFor < 12000 || quietFor > 5 * 60 * 1000) continue;
-      const interval = Math.max(30, defaults.lurkIntervalSeconds || 90) * 1000;
+      const quietThreshold = Math.max(2, defaults.lurkQuietSeconds || 5) * 1000;
+      if (quietFor < quietThreshold || quietFor > 5 * 60 * 1000) continue;
+      const interval = Math.max(30, defaults.lurkIntervalSeconds || 45) * 1000;
       if (now - Math.max(activity.lastSpoke, activity.createdAt) < interval)
         continue;
       const license = this.store.getLicense(activity.botId, activity.groupId);
@@ -201,6 +203,7 @@ export class EventPipeline {
           activity.botId,
           activity.groupId,
         ).slice(0, 600);
+        if (!clean || /^\[\[?SILENT\]?\]$/i.test(clean)) continue;
         this.hub.sendAction(
           activity.botId,
           groupAction(activity.groupId, clean),
@@ -888,6 +891,10 @@ export class EventPipeline {
     }
     return {
       ...value,
+      lurkEnabled: value.lurkEnabled !== false,
+      lurkMinMessages: integer(value.lurkMinMessages, 2, 2, 20),
+      lurkQuietSeconds: integer(value.lurkQuietSeconds, 5, 2, 60),
+      lurkIntervalSeconds: integer(value.lurkIntervalSeconds, 45, 30, 3600),
       idleEnabled: value.idleEnabled !== false,
       idleAfterMinutes: integer(value.idleAfterMinutes, 30, 1, 1440),
       idleMaxAttempts: integer(value.idleMaxAttempts, 2, 1, 5),
