@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
   [string]$StartScript = "C:\NapCat\start-bot1.ps1",
   [int]$OneBotPort = 3001,

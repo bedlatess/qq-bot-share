@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
   [Parameter(Mandatory = $true)][string]$StartScript,
   [Parameter(Mandatory = $true)][int]$OneBotPort,
