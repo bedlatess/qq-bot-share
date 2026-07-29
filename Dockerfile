@@ -25,6 +25,7 @@ COPY packages/shared/package.json packages/shared/package.json
 RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=build /app/apps/control/dist apps/control/dist
 COPY --from=build /app/apps/control/public apps/control/public
+COPY --from=build /app/packages/shared/package.json packages/shared/package.json
 COPY --from=build /app/packages/shared/dist packages/shared/dist
 RUN mkdir -p /app/data && chown -R node:node /app/data
 USER node
