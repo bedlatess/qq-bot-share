@@ -170,6 +170,13 @@ export class Store {
         created_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_usage_created ON usage_events(created_at);
+      CREATE TABLE IF NOT EXISTS usage_totals (
+        id INTEGER PRIMARY KEY CHECK(id=1),
+        call_count INTEGER NOT NULL DEFAULT 0,
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS moderation_events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         bot_id TEXT NOT NULL,
@@ -210,6 +217,21 @@ export class Store {
       CREATE INDEX IF NOT EXISTS idx_custom_commands_scope
         ON custom_commands(enabled,bot_id,group_id,updated_at);
     `);
+    const usageColumns = this.db
+      .prepare("PRAGMA table_info(usage_events)")
+      .all() as Array<{ name: string }>;
+    if (!usageColumns.some((column) => column.name === "latency_ms"))
+      this.db.exec(
+        "ALTER TABLE usage_events ADD COLUMN latency_ms INTEGER NOT NULL DEFAULT 0",
+      );
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO usage_totals
+         (id,call_count,input_tokens,output_tokens,updated_at)
+         SELECT 1,COUNT(*),COALESCE(SUM(input_tokens),0),COALESCE(SUM(output_tokens),0),?
+         FROM usage_events`,
+      )
+      .run(nowIso());
   }
 
   async bootstrap(email: string, password: string) {
@@ -514,6 +536,45 @@ export class Store {
       )
       .run(nowIso(), license.id);
     return Number(license.usage_count) + 1;
+  }
+
+  recordUsage(event: {
+    botId: string;
+    groupId?: string;
+    providerId: string;
+    kind: string;
+    inputTokens?: number;
+    outputTokens?: number;
+    latencyMs?: number;
+  }) {
+    const inputTokens = Math.max(0, Number(event.inputTokens || 0));
+    const outputTokens = Math.max(0, Number(event.outputTokens || 0));
+    const latencyMs = Math.max(0, Number(event.latencyMs || 0));
+    const createdAt = nowIso();
+    this.db.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO usage_events
+           (bot_id,group_id,provider_id,kind,input_tokens,output_tokens,latency_ms,created_at)
+           VALUES (?,?,?,?,?,?,?,?)`,
+        )
+        .run(
+          event.botId,
+          event.groupId || null,
+          event.providerId,
+          event.kind,
+          inputTokens,
+          outputTokens,
+          latencyMs,
+          createdAt,
+        );
+      this.db
+        .prepare(
+          `UPDATE usage_totals SET call_count=call_count+1,
+           input_tokens=input_tokens+?,output_tokens=output_tokens+?,updated_at=? WHERE id=1`,
+        )
+        .run(inputTokens, outputTokens, createdAt);
+    })();
   }
 
   recordHumanActivity(botId: string, groupId: string, at = new Date()) {

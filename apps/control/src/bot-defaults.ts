@@ -33,7 +33,7 @@ export const botDefaultsFallback: BotDefaults = {
   lurkEnabled: true,
   lurkMinMessages: 1,
   lurkQuietSeconds: 3,
-  lurkIntervalSeconds: 45,
+  lurkIntervalSeconds: 10,
   idleEnabled: true,
   idleAfterMinutes: 30,
   idleMaxAttempts: 2,
@@ -59,7 +59,7 @@ export const legacyBotDefaultValues: Partial<
   ],
   lurkMinMessages: ["2", "3"],
   lurkQuietSeconds: ["5"],
-  lurkIntervalSeconds: ["90"],
+  lurkIntervalSeconds: ["45", "90"],
   idlePrompt: [
     "群聊冷场时自然发起一个轻量、容易回答的话题，通常20到80字。有近期上下文就顺势延伸，没有上下文就从日常、趣闻、技术、游戏或轻松讨论中选择一个话题。每次只说一个主题，不要说“怎么没人说话”或催促群友，不要@全体成员。第二次尝试必须避开第一次的主题和表达。",
   ],

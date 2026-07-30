@@ -209,8 +209,30 @@ export async function buildApp(config: AppConfig) {
   });
 
   app.get("/api/dashboard", async () => {
-    const scalar = (sql: string) =>
-      Number((store.db.prepare(sql).get() as any)?.count || 0);
+    const scalar = (sql: string, ...params: unknown[]) =>
+      Number((store.db.prepare(sql).get(...params) as any)?.count || 0);
+    const chinaDate = new Date(Date.now() + 8 * 60 * 60 * 1000)
+      .toISOString()
+      .slice(0, 10);
+    const todayStart = new Date(`${chinaDate}T00:00:00+08:00`).toISOString();
+    const sevenDaysAgo = new Date(Date.now() - 7 * 86400000).toISOString();
+    const usageTotals = store.db
+      .prepare("SELECT * FROM usage_totals WHERE id=1")
+      .get() as any;
+    const usageRecent = store.db
+      .prepare(
+        `SELECT COUNT(*) call_count,COALESCE(SUM(input_tokens),0) input_tokens,
+         COALESCE(SUM(output_tokens),0) output_tokens,
+         COALESCE(ROUND(AVG(NULLIF(latency_ms,0))),0) avg_latency_ms
+         FROM usage_events WHERE created_at>=?`,
+      )
+      .get(todayStart) as any;
+    const usageByKind = store.db
+      .prepare(
+        `SELECT kind,COUNT(*) count FROM usage_events
+         WHERE created_at>=? GROUP BY kind ORDER BY count DESC`,
+      )
+      .all(sevenDaysAgo);
     return {
       ok: true,
       data: {
@@ -238,11 +260,24 @@ export async function buildApp(config: AppConfig) {
             "SELECT COUNT(*) count FROM ai_providers WHERE health_status='healthy'",
           ),
         },
-        usageToday: scalar(
-          "SELECT COUNT(*) count FROM usage_events WHERE created_at>=date('now')",
-        ),
+        usageToday: Number(usageRecent.call_count || 0),
+        usage: {
+          today: Number(usageRecent.call_count || 0),
+          total: Number(usageTotals?.call_count || 0),
+          last7Days: scalar(
+            "SELECT COUNT(*) count FROM usage_events WHERE created_at>=?",
+            sevenDaysAgo,
+          ),
+          inputTokens: Number(usageTotals?.input_tokens || 0),
+          outputTokens: Number(usageTotals?.output_tokens || 0),
+          todayInputTokens: Number(usageRecent.input_tokens || 0),
+          todayOutputTokens: Number(usageRecent.output_tokens || 0),
+          averageLatencyMs: Number(usageRecent.avg_latency_ms || 0),
+          byKind: usageByKind,
+        },
         moderationToday: scalar(
-          "SELECT COUNT(*) count FROM moderation_events WHERE created_at>=date('now')",
+          "SELECT COUNT(*) count FROM moderation_events WHERE created_at>=?",
+          todayStart,
         ),
         storage: storage.usage(),
       },
@@ -888,7 +923,7 @@ function registerSettingsRoutes(app: any, store: Store) {
           lurkEnabled: z.boolean(),
           lurkMinMessages: z.number().int().min(1).max(20),
           lurkQuietSeconds: z.number().int().min(1).max(60),
-          lurkIntervalSeconds: z.number().int().min(30).max(3600),
+          lurkIntervalSeconds: z.number().int().min(5).max(3600),
           idleEnabled: z.boolean(),
           idleAfterMinutes: z.number().int().min(1).max(1440),
           idleMaxAttempts: z.number().int().min(1).max(5),
@@ -905,6 +940,12 @@ function registerSettingsRoutes(app: any, store: Store) {
 }
 
 function registerLogRoutes(app: any, store: Store, storage: StorageManager) {
+  const tableFor = (type: "audit" | "moderation" | "usage") =>
+    type === "moderation"
+      ? "moderation_events"
+      : type === "usage"
+        ? "usage_events"
+        : "audit_logs";
   app.get("/api/logs", async (request: any) => {
     const query = z
       .object({
@@ -912,18 +953,42 @@ function registerLogRoutes(app: any, store: Store, storage: StorageManager) {
         limit: z.coerce.number().int().min(1).max(500).default(100),
       })
       .parse(request.query);
-    const table =
-      query.type === "moderation"
-        ? "moderation_events"
-        : query.type === "usage"
-          ? "usage_events"
-          : "audit_logs";
+    const table = tableFor(query.type);
     return {
       ok: true,
       data: store.db
         .prepare(`SELECT * FROM ${table} ORDER BY created_at DESC LIMIT ?`)
         .all(query.limit),
     };
+  });
+  app.get("/api/logs/counts", async () => ({
+    ok: true,
+    data: {
+      audit: Number(
+        (store.db.prepare("SELECT COUNT(*) count FROM audit_logs").get() as any)
+          ?.count || 0,
+      ),
+      moderation: Number(
+        (
+          store.db
+            .prepare("SELECT COUNT(*) count FROM moderation_events")
+            .get() as any
+        )?.count || 0,
+      ),
+      usage: Number(
+        (store.db.prepare("SELECT COUNT(*) count FROM usage_events").get() as any)
+          ?.count || 0,
+      ),
+    },
+  }));
+  app.delete("/api/logs/:type", async (request: any) => {
+    const type = z.enum(["audit", "moderation", "usage"]).parse(request.params.type);
+    const deleted = store.db.prepare(`DELETE FROM ${tableFor(type)}`).run().changes;
+    if (type !== "audit")
+      store.audit(`admin:${request.admin.email}`, `logs.${type}.clear`, undefined, {
+        deleted,
+      });
+    return { ok: true, data: { deleted } };
   });
   app.get("/api/storage", async () => ({ ok: true, data: storage.usage() }));
   app.post("/api/storage/cleanup", async (request: any) => {

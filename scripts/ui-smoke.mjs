@@ -29,6 +29,7 @@ try {
   await page.locator('input[type="password"]').fill(password);
   await page.getByRole("button", { name: "进入控制台" }).click();
   await page.getByRole("heading", { name: "总览" }).waitFor();
+  await page.getByText("累计调用", { exact: true }).waitFor();
   errors.length = 0;
   await page.screenshot({
     path: `${output}/dashboard-desktop.png`,
@@ -61,6 +62,19 @@ try {
     path: `${output}/settings-custom-commands-desktop.png`,
     fullPage: true,
   });
+  await page.getByRole("button", { name: /日志与存储/ }).click();
+  await page.getByRole("heading", { name: "日志与存储" }).waitFor();
+  await page.getByRole("button", { name: "清空当前日志" }).waitFor();
+  await page.screenshot({
+    path: `${output}/logs-desktop.png`,
+    fullPage: true,
+  });
+  const logsOverflow = await page.evaluate(
+    () => document.documentElement.scrollWidth > window.innerWidth + 1,
+  );
+  if (logsOverflow) throw new Error("logs layout has horizontal overflow");
+  await page.getByRole("button", { name: /机器人设置/ }).click();
+  await page.getByRole("heading", { name: "机器人设置" }).waitFor();
   await page.getByRole("button", { name: "出站过滤" }).click();
   await page.getByRole("heading", { name: "AI 出站过滤" }).waitFor();
   await page.setViewportSize({ width: 390, height: 844 });
@@ -82,6 +96,7 @@ try {
         `${output}/dashboard-desktop.png`,
         `${output}/settings-persona-desktop.png`,
         `${output}/settings-custom-commands-desktop.png`,
+        `${output}/logs-desktop.png`,
         `${output}/settings-mobile.png`,
       ],
     }),

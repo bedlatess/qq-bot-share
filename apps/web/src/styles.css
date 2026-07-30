@@ -421,22 +421,20 @@ a:focus-visible {
 .inline-stats {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  margin-top: 40px;
+  margin-top: 24px;
   border-top: 1px solid var(--line);
+  border-left: 1px solid var(--line);
 }
 
 .inline-stats div {
-  min-height: 102px;
-  padding: 18px 20px 12px;
+  min-height: 94px;
+  padding: 16px;
   border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
 }
 
 .inline-stats div:first-child {
-  padding-left: 0;
-}
-
-.inline-stats div:last-child {
-  border-right: 0;
+  padding-left: 16px;
 }
 
 .inline-stats span {
@@ -450,7 +448,7 @@ a:focus-visible {
   margin-top: 13px;
   color: var(--ink);
   font-family: "IBM Plex Mono", monospace;
-  font-size: 28px;
+  font-size: 23px;
   font-weight: 400;
 }
 
@@ -626,6 +624,35 @@ a:focus-visible {
 .segmented button.selected {
   color: #ffffff;
   background: #393939;
+}
+
+.summary-counts {
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 0 !important;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+}
+
+.summary-counts span {
+  min-height: 38px;
+  padding: 0 14px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.summary-counts span + span {
+  border-left: 1px solid var(--line);
+}
+
+.summary-counts b {
+  color: var(--ink);
+  font-family: "IBM Plex Mono", monospace;
+  font-weight: 600;
 }
 
 .table-wrap {
@@ -1409,16 +1436,13 @@ legend {
   }
 
   .inline-stats {
-    margin-top: 24px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    margin-top: 20px;
   }
 
   .inline-stats div {
     min-height: 92px;
     padding: 14px 10px;
-  }
-
-  .inline-stats div:first-child {
-    padding-left: 0;
   }
 
   .inline-stats strong {

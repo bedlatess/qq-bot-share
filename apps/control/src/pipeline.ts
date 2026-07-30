@@ -167,7 +167,7 @@ export class EventPipeline {
       const quietFor = now - activity.lastAt;
       const quietThreshold = Math.max(1, defaults.lurkQuietSeconds || 3) * 1000;
       if (quietFor < quietThreshold || quietFor > 5 * 60 * 1000) continue;
-      const interval = Math.max(30, defaults.lurkIntervalSeconds || 45) * 1000;
+      const interval = Math.max(5, defaults.lurkIntervalSeconds || 10) * 1000;
       if (activity.lastSpoke > 0 && now - activity.lastSpoke < interval)
         continue;
       const license = this.store.getLicense(activity.botId, activity.groupId);
@@ -898,7 +898,7 @@ export class EventPipeline {
       lurkEnabled: value.lurkEnabled !== false,
       lurkMinMessages: integer(value.lurkMinMessages, 1, 1, 20),
       lurkQuietSeconds: integer(value.lurkQuietSeconds, 3, 1, 60),
-      lurkIntervalSeconds: integer(value.lurkIntervalSeconds, 45, 30, 3600),
+      lurkIntervalSeconds: integer(value.lurkIntervalSeconds, 10, 5, 3600),
       idleEnabled: value.idleEnabled !== false,
       idleAfterMinutes: integer(value.idleAfterMinutes, 30, 1, 1440),
       idleMaxAttempts: integer(value.idleMaxAttempts, 2, 1, 5),

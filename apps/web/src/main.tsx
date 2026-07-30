@@ -344,6 +344,14 @@ function Dashboard({ notify }: PageProps) {
       "yellow",
     ],
   ] as const;
+  const usage = data.usage || {
+    today: data.usageToday || 0,
+    total: data.usageToday || 0,
+    last7Days: data.usageToday || 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    averageLatencyMs: 0,
+  };
   return (
     <>
       <div className="metric-grid">
@@ -359,19 +367,37 @@ function Dashboard({ notify }: PageProps) {
       </div>
       <section className="split-section">
         <div>
-          <SectionHead eyebrow="TRAFFIC" title="今日运行" />
+          <SectionHead eyebrow="TRAFFIC" title="调用概况" />
           <div className="inline-stats">
             <div>
-              <span>AI 调用</span>
-              <strong>{data.usageToday}</strong>
+              <span>今日调用</span>
+              <strong>{numberText(usage.today)}</strong>
             </div>
             <div>
-              <span>审核处置</span>
-              <strong>{data.moderationToday}</strong>
+              <span>累计调用</span>
+              <strong>{numberText(usage.total)}</strong>
             </div>
             <div>
-              <span>存储占用</span>
-              <strong>{formatBytes(data.storage.usedBytes)}</strong>
+              <span>近 7 日</span>
+              <strong>{numberText(usage.last7Days)}</strong>
+            </div>
+            <div>
+              <span>今日审核</span>
+              <strong>{numberText(data.moderationToday)}</strong>
+            </div>
+            <div>
+              <span>累计 Token</span>
+              <strong>
+                {numberText(usage.inputTokens + usage.outputTokens)}
+              </strong>
+            </div>
+            <div>
+              <span>今日平均响应</span>
+              <strong>
+                {usage.averageLatencyMs
+                  ? `${numberText(usage.averageLatencyMs)} ms`
+                  : "-"}
+              </strong>
             </div>
           </div>
         </div>
@@ -474,9 +500,13 @@ function BotsPage({ notify }: PageProps) {
   return (
     <>
       <div className="action-row">
-        <div className="segmented">
-          <button className="selected">运行节点 {nodes.data.length}</button>
-          <button>机器人 {bots.data.length}</button>
+        <div className="summary-counts" aria-label="实例统计">
+          <span>
+            运行节点 <b>{nodes.data.length}</b>
+          </span>
+          <span>
+            机器人 <b>{bots.data.length}</b>
+          </span>
         </div>
         <div>
           <button className="secondary" onClick={() => setDialog("node")}>
@@ -1704,6 +1734,11 @@ function CustomCommandsEditor({ notify }: PageProps) {
 function LogsPage({ notify }: PageProps) {
   const [type, setType] = useState("audit");
   const logs = useData<any[]>(`/logs?type=${type}&limit=200`, []);
+  const counts = useData<Record<string, number>>("/logs/counts", {
+    audit: 0,
+    moderation: 0,
+    usage: 0,
+  });
   const storage = useData<any>("/storage", null);
   return (
     <>
@@ -1711,9 +1746,9 @@ function LogsPage({ notify }: PageProps) {
         <div className="segmented">
           {(
             [
-              ["audit", "操作日志"],
-              ["moderation", "审核事件"],
-              ["usage", "调用记录"],
+              ["audit", `操作日志 ${counts.data.audit || 0}`],
+              ["moderation", `审核事件 ${counts.data.moderation || 0}`],
+              ["usage", `调用记录 ${counts.data.usage || 0}`],
             ] as Array<[string, string]>
           ).map(([id, label]) => (
             <button
@@ -1739,14 +1774,44 @@ function LogsPage({ notify }: PageProps) {
           <button
             className="primary"
             onClick={async () => {
-              await api("/storage/cleanup", { method: "POST" });
+              const result = await api<any>("/storage/cleanup", {
+                method: "POST",
+              });
               await storage.reload();
               await logs.reload();
-              notify("清理完成");
+              await counts.reload();
+              const deleted =
+                Number(result.sessions || 0) +
+                Number(result.usageEvents || 0) +
+                Number(result.auditLogs || 0) +
+                Number(result.moderationEvents || 0) +
+                Number(result.filesDeleted || 0);
+              notify(`过期数据清理完成，共处理 ${deleted} 项`);
             }}
           >
             <Trash2 size={16} />
-            执行清理
+            清理过期数据
+          </button>
+          <button
+            className="secondary"
+            onClick={async () => {
+              const label =
+                type === "audit"
+                  ? "操作日志"
+                  : type === "moderation"
+                    ? "审核事件"
+                    : "调用记录";
+              if (!confirm(`确定清空全部${label}？此操作不可撤销。`)) return;
+              const result = await api<{ deleted: number }>(`/logs/${type}`, {
+                method: "DELETE",
+              });
+              await logs.reload();
+              await counts.reload();
+              notify(`已清空 ${result.deleted} 条${label}`);
+            }}
+          >
+            <X size={16} />
+            清空当前日志
           </button>
         </div>
       </div>
@@ -1789,10 +1854,17 @@ function LogsPage({ notify }: PageProps) {
                   {row.reason ||
                     row.excerpt ||
                     row.detail_json ||
-                    `${row.input_tokens || 0}/${row.output_tokens || 0} tokens`}
+                    `${row.input_tokens || 0}/${row.output_tokens || 0} tokens · ${row.latency_ms || 0} ms`}
                 </td>
               </tr>
             ))}
+            {!logs.data.length && (
+              <tr>
+                <td colSpan={4} className="empty-row">
+                  当前没有记录
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>
@@ -2244,6 +2316,10 @@ function formatBytes(bytes: number) {
     i++;
   }
   return `${value.toFixed(i > 1 ? 1 : 0)} ${units[i]}`;
+}
+
+function numberText(value: number) {
+  return Number(value || 0).toLocaleString("zh-CN");
 }
 function dateText(value: string | null) {
   if (!value) return "-";

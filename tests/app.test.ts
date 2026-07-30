@@ -110,6 +110,68 @@ test("admin login, CSRF protection and node creation work through HTTP API", asy
     });
     assert.equal(customRows.json().data.length, 1);
     assert.equal(customRows.json().data[0].trigger_text, "群规");
+
+    app.puff.store.recordUsage({
+      botId: bot.json().data.id,
+      groupId: "10001",
+      providerId: "provider_1",
+      kind: "chat",
+      inputTokens: 120,
+      outputTokens: 30,
+      latencyMs: 850,
+    });
+    app.puff.store.recordUsage({
+      botId: bot.json().data.id,
+      groupId: "10001",
+      providerId: "provider_1",
+      kind: "lurk",
+      inputTokens: 80,
+      outputTokens: 20,
+      latencyMs: 1150,
+    });
+    const usageDashboard = await app.inject({
+      method: "GET",
+      url: "/api/dashboard",
+      headers: { cookie },
+    });
+    assert.equal(usageDashboard.json().data.usage.total, 2);
+    assert.equal(usageDashboard.json().data.usage.inputTokens, 200);
+    assert.equal(usageDashboard.json().data.usage.outputTokens, 50);
+    assert.equal(usageDashboard.json().data.usage.averageLatencyMs, 1000);
+
+    const logCounts = await app.inject({
+      method: "GET",
+      url: "/api/logs/counts",
+      headers: { cookie },
+    });
+    assert.equal(logCounts.json().data.usage, 2);
+    const clearedUsage = await app.inject({
+      method: "DELETE",
+      url: "/api/logs/usage",
+      headers: { cookie, "x-csrf-token": loginBody.csrf },
+    });
+    assert.equal(clearedUsage.json().data.deleted, 2);
+    const dashboardAfterClear = await app.inject({
+      method: "GET",
+      url: "/api/dashboard",
+      headers: { cookie },
+    });
+    assert.equal(dashboardAfterClear.json().data.usage.total, 2);
+    assert.equal(dashboardAfterClear.json().data.usage.today, 0);
+
+    const clearedAudit = await app.inject({
+      method: "DELETE",
+      url: "/api/logs/audit",
+      headers: { cookie, "x-csrf-token": loginBody.csrf },
+    });
+    assert.ok(clearedAudit.json().data.deleted > 0);
+    const countsAfterClear = await app.inject({
+      method: "GET",
+      url: "/api/logs/counts",
+      headers: { cookie },
+    });
+    assert.equal(countsAfterClear.json().data.audit, 0);
+    assert.equal(countsAfterClear.json().data.usage, 0);
   } finally {
     await app.close();
     rmSync(dataDir, { recursive: true, force: true });

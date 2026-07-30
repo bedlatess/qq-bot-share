@@ -59,7 +59,10 @@ export class ProviderPool {
       const started = Date.now();
       try {
         const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), provider.timeout_ms);
+        const requestTimeout = shortReply
+          ? Math.min(provider.timeout_ms, 12000)
+          : provider.timeout_ms;
+        const timer = setTimeout(() => controller.abort(), requestTimeout);
         const response = await fetch(endpoint(provider.base_url, '/v1/chat/completions'), {
           method: 'POST',
           headers: {
@@ -79,11 +82,17 @@ export class ProviderPool {
           ? content.map((part: any) => typeof part === 'string' ? part : part?.text || '').join('')
           : String(content || '');
         if (!text.trim()) throw new Error('模型返回空内容');
-        this.markSuccess(provider.id, Date.now() - started);
-        this.store.db.prepare(`INSERT INTO usage_events
-          (bot_id,group_id,provider_id,kind,input_tokens,output_tokens,created_at) VALUES (?,?,?,?,?,?,?)`)
-          .run(context.botId, context.groupId || null, provider.id, context.kind,
-            Number(payload.usage?.prompt_tokens || 0), Number(payload.usage?.completion_tokens || 0), nowIso());
+        const latencyMs = Date.now() - started;
+        this.markSuccess(provider.id, latencyMs);
+        this.store.recordUsage({
+          botId: context.botId,
+          groupId: context.groupId,
+          providerId: provider.id,
+          kind: context.kind,
+          inputTokens: Number(payload.usage?.prompt_tokens || 0),
+          outputTokens: Number(payload.usage?.completion_tokens || 0),
+          latencyMs,
+        });
         return { text: text.trim(), providerId: provider.id, usage: payload.usage || null };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -113,9 +122,15 @@ export class ProviderPool {
         const payload = await response.json() as any;
         const item = payload.data?.[0];
         if (!item?.b64_json && !item?.url) throw new Error('生图接口未返回图片');
-        this.markSuccess(provider.id, Date.now() - started);
-        this.store.db.prepare(`INSERT INTO usage_events (bot_id,group_id,provider_id,kind,created_at) VALUES (?,?,?,?,?)`)
-          .run(context.botId, context.groupId || null, provider.id, 'image', nowIso());
+        const latencyMs = Date.now() - started;
+        this.markSuccess(provider.id, latencyMs);
+        this.store.recordUsage({
+          botId: context.botId,
+          groupId: context.groupId,
+          providerId: provider.id,
+          kind: 'image',
+          latencyMs,
+        });
         return { base64: item.b64_json as string | undefined, url: item.url as string | undefined, providerId: provider.id };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -161,7 +176,9 @@ export class ProviderPool {
 
   private markFailure(provider: ProviderRow, message: string) {
     const failures = Number(provider.failure_count || 0) + 1;
-    const cooldown = failures >= 3 ? new Date(Date.now() + 120000).toISOString() : null;
+    const cooldown = new Date(
+      Date.now() + (failures >= 3 ? 120000 : 30000),
+    ).toISOString();
     this.store.db.prepare(`UPDATE ai_providers SET health_status='unhealthy',failure_count=?,cooldown_until=?,
       last_error=?,updated_at=? WHERE id=?`).run(failures, cooldown, message.slice(0, 500), nowIso(), provider.id);
   }
