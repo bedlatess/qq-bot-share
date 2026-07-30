@@ -1,6 +1,8 @@
 import { hostname } from 'node:os';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import WebSocket from 'ws';
-import type { AgentEvent, ControlMessage } from '@puff/shared';
+import { PUFF_VERSION, type AgentEvent, type ControlMessage } from '@puff/shared';
 import type { AgentConfig } from './config.js';
 import { BotConnection } from './bot-connection.js';
 import { DiskSpool } from './spool.js';
@@ -12,6 +14,7 @@ export class Agent {
   private heartbeatTimer?: NodeJS.Timeout;
   private retries = 0;
   private stopped = false;
+  private updateQueued = false;
   private readonly spool: DiskSpool;
   private readonly bots = new Map<string, BotConnection>();
 
@@ -87,7 +90,7 @@ export class Agent {
   }
 
   private sendHello() {
-    this.send({ type: 'hello', nodeId: this.config.nodeId, version: '2.0.0', hostname: hostname(), bots: [...this.bots.values()].map((bot) => ({ id: bot.config.id, qq: bot.config.qq, online: bot.online })) });
+    this.send({ type: 'hello', nodeId: this.config.nodeId, version: PUFF_VERSION, hostname: hostname(), bots: [...this.bots.values()].map((bot) => ({ id: bot.config.id, qq: bot.config.qq, online: bot.online })) });
   }
 
   private sendHeartbeat() {
@@ -101,8 +104,50 @@ export class Agent {
   private async handleControl(raw: string) {
     let message: ControlMessage;
     try { message = JSON.parse(raw) as ControlMessage; } catch { return; }
+    if (message.type === 'hello_ack') {
+      if (
+        this.config.autoUpdate &&
+        message.update &&
+        message.update.version !== PUFF_VERSION &&
+        !this.updateQueued
+      ) {
+        this.updateQueued = true;
+        const url = new URL(message.update.url);
+        url.searchParams.set('nodeId', this.config.nodeId);
+        const pendingPath = resolve(process.cwd(), 'data', 'pending-agent-update.json');
+        mkdirSync(resolve(process.cwd(), 'data'), { recursive: true });
+        writeFileSync(
+          pendingPath,
+          JSON.stringify({ ...message.update, url: url.toString() }, null, 2),
+          'utf8',
+        );
+        console.log(`[update] queued ${PUFF_VERSION} -> ${message.update.version}`);
+        this.stop();
+        setTimeout(() => process.exit(75), 200);
+      }
+      return;
+    }
     if (message.type === 'action') {
       try { this.bots.get(message.botId)?.send(message.action); } catch (error) { console.error('[action]', error); }
+      return;
+    }
+    if (message.type === 'bot_request') {
+      const bot = this.bots.get(message.botId);
+      if (!bot)
+        return this.send({ type: 'bot_response', requestId: message.requestId, ok: false, error: 'bot not found' });
+      try {
+        const data = message.operation === 'groups'
+          ? await bot.request('get_group_list', { no_cache: true }, 15000)
+          : null;
+        this.send({ type: 'bot_response', requestId: message.requestId, ok: true, data });
+      } catch (error) {
+        this.send({
+          type: 'bot_response',
+          requestId: message.requestId,
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
       return;
     }
     if (message.type === 'napcat_request') {

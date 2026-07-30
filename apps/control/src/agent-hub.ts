@@ -2,6 +2,7 @@ import type WebSocket from "ws";
 import {
   nowIso,
   type AgentMessage,
+  type AgentUpdateManifest,
   type ControlNapCatRequest,
   type OneBotAction,
 } from "@puff/shared";
@@ -20,7 +21,10 @@ export class AgentHub {
   private readonly pending = new Map<string, PendingRequest>();
   onEvent?: (botId: string, eventId: string, event: any) => Promise<void>;
 
-  constructor(private readonly store: Store) {}
+  constructor(
+    private readonly store: Store,
+    private readonly agentUpdate?: AgentUpdateManifest,
+  ) {}
 
   authenticate(nodeId: string, token: string) {
     return Boolean(
@@ -53,7 +57,13 @@ export class AgentHub {
         )
         .run(nowIso(), nodeId);
     });
-    socket.send(JSON.stringify({ type: "hello_ack", at: Date.now() }));
+    socket.send(
+      JSON.stringify({
+        type: "hello_ack",
+        at: Date.now(),
+        ...(this.agentUpdate ? { update: this.agentUpdate } : {}),
+      }),
+    );
   }
 
   private async handle(nodeId: string, raw: string) {
@@ -104,7 +114,7 @@ export class AgentHub {
       await this.onEvent?.(message.botId, message.eventId, message.event);
       return;
     }
-    if (message.type === "napcat_response") {
+    if (message.type === "napcat_response" || message.type === "bot_response") {
       const pending = this.pending.get(message.requestId);
       if (!pending) return;
       clearTimeout(pending.timer);
@@ -164,6 +174,35 @@ export class AgentHub {
           botId,
           operation,
         } satisfies ControlNapCatRequest),
+      );
+    });
+  }
+
+  requestBotGroups(botId: string, timeoutMs = 20000) {
+    const nodeId =
+      this.botNodes.get(botId) ||
+      (
+        this.store.db
+          .prepare("SELECT node_id FROM bots WHERE id=?")
+          .get(botId) as any
+      )?.node_id;
+    const socket = nodeId ? this.sockets.get(nodeId) : undefined;
+    if (!socket || socket.readyState !== 1)
+      return Promise.reject(new Error("机器人节点离线"));
+    const requestId = randomId("botreq_");
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(requestId);
+        reject(new Error("群列表同步超时"));
+      }, timeoutMs);
+      this.pending.set(requestId, { resolve, reject, timer });
+      socket.send(
+        JSON.stringify({
+          type: "bot_request",
+          requestId,
+          botId,
+          operation: "groups",
+        }),
       );
     });
   }

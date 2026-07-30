@@ -1,17 +1,22 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { PUFF_VERSION } from "@puff/shared";
 import { buildApp } from "../apps/control/src/app.js";
 
 test("admin login, CSRF protection and node creation work through HTTP API", async () => {
   const dataDir = mkdtempSync(join(tmpdir(), "puff-app-test-"));
+  const agentBundlePath = join(dataDir, "agent-bundle.tar.gz");
+  writeFileSync(agentBundlePath, "test-agent-bundle");
   const app = await buildApp({
     host: "127.0.0.1",
     port: 0,
     dataDir,
     publicDir: join(dataDir, "missing-public"),
+    agentBundlePath,
     publicUrl: "http://127.0.0.1:17866",
     adminEmail: "admin@example.com",
     adminPassword: "test-password-123",
@@ -58,6 +63,24 @@ test("admin login, CSRF protection and node creation work through HTTP API", asy
     assert.ok(created.json().data.nodeId);
     assert.ok(created.json().data.nodeToken);
     assert.equal(created.json().data.id, undefined);
+
+    const agentBundle = await app.inject({
+      method: "GET",
+      url: `/agent-update?nodeId=${created.json().data.nodeId}`,
+      headers: { authorization: `Bearer ${created.json().data.nodeToken}` },
+    });
+    assert.equal(agentBundle.statusCode, 200);
+    assert.equal(agentBundle.body, "test-agent-bundle");
+    assert.equal(agentBundle.headers["x-puff-version"], PUFF_VERSION);
+    assert.equal(
+      agentBundle.headers["x-puff-sha256"],
+      createHash("sha256").update("test-agent-bundle").digest("hex"),
+    );
+    const rejectedAgentBundle = await app.inject({
+      method: "GET",
+      url: `/agent-update?nodeId=${created.json().data.nodeId}`,
+    });
+    assert.equal(rejectedAgentBundle.statusCode, 404);
 
     app.puff.store.db
       .prepare("UPDATE nodes SET status='online',last_seen_at=?")
@@ -110,6 +133,40 @@ test("admin login, CSRF protection and node creation work through HTTP API", asy
     });
     assert.equal(customRows.json().data.length, 1);
     assert.equal(customRows.json().data[0].trigger_text, "群规");
+
+    app.puff.store.syncBotGroups(bot.json().data.id, [
+      {
+        group_id: "10001",
+        group_name: "测试群",
+        member_count: 28,
+        max_member_count: 200,
+        role: "admin",
+      },
+    ]);
+    const groups = await app.inject({
+      method: "GET",
+      url: "/api/groups",
+      headers: { cookie },
+    });
+    assert.equal(groups.statusCode, 200);
+    assert.equal(groups.json().data[0].group_name, "测试群");
+    assert.equal(groups.json().data[0].member_count, 28);
+
+    const traceId = app.puff.store.createMessageTrace({
+      eventId: "event-diagnostic-1",
+      botId: bot.json().data.id,
+      groupId: "10001",
+      userId: "20001",
+      excerpt: "机器人为什么没回复",
+    });
+    app.puff.store.updateMessageTrace(traceId, "ignored", "群未授权");
+    const diagnostics = await app.inject({
+      method: "GET",
+      url: "/api/diagnostics?decision=ignored",
+      headers: { cookie },
+    });
+    assert.equal(diagnostics.statusCode, 200);
+    assert.equal(diagnostics.json().data.rows[0].reason, "群未授权");
 
     app.puff.store.recordUsage({
       botId: bot.json().data.id,

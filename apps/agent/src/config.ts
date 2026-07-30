@@ -8,6 +8,7 @@ export const agentConfigSchema = z.object({
   controlUrl: z.string().url(),
   spoolDir: z.string().default('./spool'),
   spoolLimitBytes: z.number().int().min(1024 * 1024).max(1024 * 1024 * 1024).default(50 * 1024 * 1024),
+  autoUpdate: z.boolean().default(true),
   bots: z.array(z.object({
     id: z.string().min(1),
     qq: z.string().regex(/^\d{5,15}$/),
@@ -24,4 +25,3 @@ export function loadAgentConfig(): AgentConfig {
   const path = resolve(process.env.PUFF_AGENT_CONFIG || './agent.config.json');
   return agentConfigSchema.parse(JSON.parse(readFileSync(path, 'utf8')));
 }
-

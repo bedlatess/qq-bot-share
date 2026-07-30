@@ -62,6 +62,7 @@ const navItems = [
   ["licenses", "群授权", ShieldCheck],
   ["cards", "卡密", KeyRound],
   ["providers", "模型网关", Network],
+  ["diagnostics", "消息诊断", TerminalSquare],
   ["settings", "机器人设置", Settings],
   ["logs", "日志与存储", Database],
 ] as const;
@@ -186,6 +187,7 @@ function App() {
           {page === "licenses" && <LicensesPage notify={notify} />}
           {page === "cards" && <CardsPage notify={notify} />}
           {page === "providers" && <ProvidersPage notify={notify} />}
+          {page === "diagnostics" && <DiagnosticsPage notify={notify} />}
           {page === "settings" && <SettingsPage notify={notify} />}
           {page === "logs" && <LogsPage notify={notify} />}
         </div>
@@ -608,6 +610,23 @@ function BotsPage({ notify }: PageProps) {
                     </button>
                     <button
                       className="icon-button"
+                      title="同步 QQ 群列表"
+                      onClick={async () => {
+                        try {
+                          const result = await api<{ count: number }>(
+                            `/bots/${bot.id}/sync-groups`,
+                            { method: "POST" },
+                          );
+                          notify(`已同步 ${result.count} 个群`);
+                        } catch (e) {
+                          notify(message(e), "error");
+                        }
+                      }}
+                    >
+                      <Users size={16} />
+                    </button>
+                    <button
+                      className="icon-button"
                       title="获取登录二维码"
                       onClick={async () => {
                         try {
@@ -762,6 +781,7 @@ function LicensesPage({ notify }: PageProps) {
   const licenses = useData<any[]>("/licenses", []);
   const plans = useData<any[]>("/plans", []);
   const bots = useData<any[]>("/bots", []);
+  const groups = useData<any[]>("/groups", []);
   const [dialog, setDialog] = useState<"license" | "plan" | null>(null);
   const [editingPlan, setEditingPlan] = useState<any>(null);
   const createLicense = async (event: React.FormEvent<HTMLFormElement>) => {
@@ -933,7 +953,23 @@ function LicensesPage({ notify }: PageProps) {
             </label>
             <label>
               QQ群号
-              <input name="groupId" required inputMode="numeric" />
+              <input
+                name="groupId"
+                required
+                inputMode="numeric"
+                list="known-qq-groups"
+                placeholder="输入群号或从已同步群中选择"
+              />
+              <datalist id="known-qq-groups">
+                {groups.data.map((group) => (
+                  <option
+                    value={group.group_id}
+                    key={`${group.bot_id}:${group.group_id}`}
+                  >
+                    {group.group_name || group.group_id} / {group.bot_name}
+                  </option>
+                ))}
+              </datalist>
             </label>
             <label>
               套餐
@@ -1263,7 +1299,15 @@ function ProvidersPage({ notify }: PageProps) {
             </div>
             <div className="provider-health">
               <b>{provider.latency_ms ? `${provider.latency_ms} ms` : "-"}</b>
-              <small>{provider.last_error || "无错误"}</small>
+              <small title={provider.last_error || "无错误"}>
+                24h 成功率{" "}
+                {provider.health24h?.successRate == null
+                  ? "待采样"
+                  : `${provider.health24h.successRate}%`}
+                {provider.health24h?.averageLatencyMs
+                  ? ` / ${provider.health24h.averageLatencyMs} ms`
+                  : ""}
+              </small>
             </div>
             <div className="row-actions">
               <button
@@ -1427,6 +1471,163 @@ function ProvidersPage({ notify }: PageProps) {
       )}
     </>
   );
+}
+
+function DiagnosticsPage({ notify }: PageProps) {
+  const bots = useData<any[]>("/bots", []);
+  const [botId, setBotId] = useState("");
+  const [groupId, setGroupId] = useState("");
+  const [decision, setDecision] = useState("");
+  const [selected, setSelected] = useState<any>(null);
+  const path = useMemo(() => {
+    const query = new URLSearchParams({ limit: "200" });
+    if (botId) query.set("botId", botId);
+    if (groupId.trim()) query.set("groupId", groupId.trim());
+    if (decision) query.set("decision", decision);
+    return `/diagnostics?${query}`;
+  }, [botId, groupId, decision]);
+  const traces = useData<{ rows: any[]; counts: any[] }>(
+    path,
+    { rows: [], counts: [] },
+    5000,
+  );
+  const countFor = (name: string) =>
+    Number(traces.data.counts.find((item) => item.decision === name)?.count || 0);
+  return (
+    <>
+      <div className="action-row diagnostic-toolbar">
+        <div className="diagnostic-filters">
+          <select value={botId} onChange={(event) => setBotId(event.target.value)}>
+            <option value="">全部机器人</option>
+            {bots.data.map((bot) => (
+              <option value={bot.id} key={bot.id}>
+                {bot.name} ({bot.qq})
+              </option>
+            ))}
+          </select>
+          <input
+            value={groupId}
+            onChange={(event) => setGroupId(event.target.value)}
+            placeholder="筛选群号"
+            inputMode="numeric"
+          />
+          <select
+            value={decision}
+            onChange={(event) => setDecision(event.target.value)}
+          >
+            <option value="">全部处理结果</option>
+            <option value="received">处理中</option>
+            <option value="queued">等待接话</option>
+            <option value="replied">已回复</option>
+            <option value="command">内置命令</option>
+            <option value="custom_reply">自定义回复</option>
+            <option value="private">私聊</option>
+            <option value="ignored">已忽略</option>
+            <option value="denied">权限不足</option>
+            <option value="moderated">审核处理</option>
+            <option value="error">处理失败</option>
+          </select>
+        </div>
+        <div>
+          <button className="secondary" onClick={() => traces.reload()}>
+            <RefreshCw size={16} />
+            刷新
+          </button>
+          <button
+            className="secondary"
+            onClick={async () => {
+              if (!confirm("确定清空消息诊断记录？")) return;
+              const result = await api<{ deleted: number }>("/diagnostics", {
+                method: "DELETE",
+              });
+              await traces.reload();
+              notify(`已清空 ${result.deleted} 条诊断记录`);
+            }}
+          >
+            <X size={16} />
+            清空
+          </button>
+        </div>
+      </div>
+      <div className="trace-summary" aria-label="最近 24 小时处理统计">
+        <span><b>{countFor("replied")}</b> 已回复</span>
+        <span><b>{countFor("queued")}</b> 等待接话</span>
+        <span><b>{countFor("ignored")}</b> 已忽略</span>
+        <span><b>{countFor("error")}</b> 失败</span>
+      </div>
+      <SectionHead eyebrow="MESSAGE PIPELINE" title="消息处理轨迹" />
+      <div className="table-wrap diagnostic-table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>时间</th>
+              <th>机器人 / 群</th>
+              <th>消息</th>
+              <th>结果</th>
+              <th>原因</th>
+              <th>网关 / 耗时</th>
+            </tr>
+          </thead>
+          <tbody>
+            {traces.data.rows.map((row) => (
+              <tr
+                key={row.id}
+                className="clickable-row"
+                onClick={() => setSelected(row)}
+              >
+                <td>{dateText(row.created_at)}</td>
+                <td>
+                  <strong>{row.bot_name}</strong>
+                  <small className="mono">{row.group_id || "私聊"}</small>
+                </td>
+                <td className="trace-excerpt">
+                  {row.excerpt || (row.image_count ? `[${row.image_count} 张图片]` : "-")}
+                </td>
+                <td><TraceBadge value={row.decision} /></td>
+                <td className="trace-reason">{row.reason || "-"}</td>
+                <td>
+                  {row.provider_name || "-"}
+                  <small>{row.latency_ms ? `${row.latency_ms} ms` : "-"}</small>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {!traces.data.rows.length && (
+          <div className="diagnostic-empty">还没有消息轨迹</div>
+        )}
+      </div>
+      {selected && (
+        <Modal title="消息诊断详情" onClose={() => setSelected(null)}>
+          <dl className="trace-detail">
+            <dt>机器人</dt><dd>{selected.bot_name} ({selected.qq})</dd>
+            <dt>群 / 用户</dt><dd>{selected.group_id || "私聊"} / {selected.user_id || "-"}</dd>
+            <dt>处理结果</dt><dd><TraceBadge value={selected.decision} /></dd>
+            <dt>原因</dt><dd>{selected.reason || "-"}</dd>
+            <dt>模型调用</dt><dd>{selected.provider_name || "-"} / {selected.latency_ms || 0} ms</dd>
+            <dt>Token</dt><dd>{selected.input_tokens || 0} / {selected.output_tokens || 0}</dd>
+          </dl>
+          <pre className="diagnostic-json">{JSON.stringify(JSON.parse(selected.detail_json || "{}"), null, 2)}</pre>
+        </Modal>
+      )}
+    </>
+  );
+}
+
+function TraceBadge({ value }: { value: string }) {
+  const labels: Record<string, string> = {
+    received: "已接收",
+    queued: "等待接话",
+    replied: "已回复",
+    command: "内置命令",
+    custom_reply: "自定义回复",
+    ignored: "已忽略",
+    denied: "权限不足",
+    moderated: "审核处理",
+    private: "私聊",
+    error: "失败",
+  };
+  return <span className={`trace-badge ${value}`}>{labels[value] || value}</span>;
 }
 
 function SettingsPage({ notify }: PageProps) {

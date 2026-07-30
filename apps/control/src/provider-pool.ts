@@ -44,7 +44,43 @@ export function chatRequestPolicy(kind: string, providerTimeoutMs: number) {
 }
 
 export class ProviderPool {
+  private healthTimer?: NodeJS.Timeout;
+  private healthInitialTimer?: NodeJS.Timeout;
+  private probing = false;
+
   constructor(private readonly store: Store, private readonly masterKey: string) {}
+
+  startHealthMonitor(intervalMs = 15 * 60 * 1000, initialDelayMs = 60 * 1000) {
+    if (this.healthTimer || this.healthInitialTimer) return;
+    const run = () => void this.probeEnabled();
+    this.healthInitialTimer = setTimeout(() => {
+      this.healthInitialTimer = undefined;
+      run();
+      this.healthTimer = setInterval(run, intervalMs);
+      this.healthTimer.unref();
+    }, initialDelayMs);
+    this.healthInitialTimer.unref();
+  }
+
+  stopHealthMonitor() {
+    if (this.healthInitialTimer) clearTimeout(this.healthInitialTimer);
+    if (this.healthTimer) clearInterval(this.healthTimer);
+    this.healthInitialTimer = undefined;
+    this.healthTimer = undefined;
+  }
+
+  private async probeEnabled() {
+    if (this.probing) return;
+    this.probing = true;
+    try {
+      const ids = this.store.db
+        .prepare("SELECT id FROM ai_providers WHERE enabled=1 ORDER BY priority")
+        .all() as Array<{ id: string }>;
+      for (const row of ids) await this.probe(row.id);
+    } finally {
+      this.probing = false;
+    }
+  }
 
   private providers(task: AiTask): ProviderRow[] {
     const rows = this.store.db.prepare(`SELECT * FROM ai_providers WHERE enabled=1 ORDER BY priority ASC,created_at ASC`)
@@ -97,11 +133,11 @@ export class ProviderPool {
           outputTokens: Number(payload.usage?.completion_tokens || 0),
           latencyMs,
         });
-        return { text: text.trim(), providerId: provider.id, usage: payload.usage || null };
+        return { text: text.trim(), providerId: provider.id, usage: payload.usage || null, latencyMs };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         errors.push(`${provider.name}: ${message}`);
-        this.markFailure(provider, message);
+        this.markFailure(provider, message, Date.now() - started);
       }
     }
     throw new Error(`全部模型网关失败：${errors.join(' | ')}`);
@@ -139,7 +175,7 @@ export class ProviderPool {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         errors.push(`${provider.name}: ${message}`);
-        this.markFailure(provider, message);
+        this.markFailure(provider, message, Date.now() - started);
       }
     }
     throw new Error(`全部生图网关失败：${errors.join(' | ')}`);
@@ -163,10 +199,11 @@ export class ProviderPool {
       this.store.db.prepare(`UPDATE ai_providers SET capabilities_json=?,health_status='healthy',failure_count=0,
         cooldown_until=NULL,last_error=NULL,latency_ms=?,updated_at=? WHERE id=?`)
         .run(JSON.stringify(inferred), Date.now() - started, nowIso(), id);
+      this.store.recordProviderHealth(id, 'probe', true, Date.now() - started);
       return { healthy: true, capabilities: inferred, latencyMs: Date.now() - started };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.markFailure(row, message);
+      this.markFailure(row, message, Date.now() - started, 'probe');
       return { healthy: false, capabilities: inferred, error: message };
     } finally {
       clearTimeout(timer);
@@ -176,14 +213,21 @@ export class ProviderPool {
   private markSuccess(id: string, latency: number) {
     this.store.db.prepare(`UPDATE ai_providers SET health_status='healthy',failure_count=0,cooldown_until=NULL,
       last_error=NULL,latency_ms=?,updated_at=? WHERE id=?`).run(latency, nowIso(), id);
+    this.store.recordProviderHealth(id, 'call', true, latency);
   }
 
-  private markFailure(provider: ProviderRow, message: string) {
+  private markFailure(
+    provider: ProviderRow,
+    message: string,
+    latency = 0,
+    source: 'call' | 'probe' = 'call',
+  ) {
     const failures = Number(provider.failure_count || 0) + 1;
     const cooldown = new Date(
       Date.now() + (failures >= 3 ? 120000 : 30000),
     ).toISOString();
     this.store.db.prepare(`UPDATE ai_providers SET health_status='unhealthy',failure_count=?,cooldown_until=?,
       last_error=?,updated_at=? WHERE id=?`).run(failures, cooldown, message.slice(0, 500), nowIso(), provider.id);
+    this.store.recordProviderHealth(provider.id, source, false, latency, message);
   }
 }

@@ -24,8 +24,11 @@ type Commands = {
 type HistoryMessage = { role: "user" | "assistant"; content: string };
 type ActivityMessage = {
   name: string;
+  role: "user" | "assistant";
   text: string;
   images: string[];
+  eventId?: string;
+  traceId?: string;
   at: number;
 };
 type GroupActivity = {
@@ -95,7 +98,6 @@ function groupAction(groupId: string, text: string): OneBotAction {
 }
 
 export class EventPipeline {
-  private readonly histories = new Map<string, HistoryMessage[]>();
   private readonly cooldowns = new Map<string, number>();
   private readonly seen = new Map<string, number>();
   private readonly groupQueues = new Map<string, Promise<void>>();
@@ -135,9 +137,15 @@ export class EventPipeline {
     const key = `${botId}:${toId(event.group_id) || `private:${toId(event.user_id)}`}`;
     const previous = this.groupQueues.get(key) || Promise.resolve();
     const next = previous
-      .then(() => this.process(botId, event))
+      .then(() => this.process(botId, eventId, event))
       .catch((error) => {
         this.onError(error, key);
+        this.store.updateMessageTraceByEventId(
+          eventId,
+          "error",
+          error instanceof Error ? error.message : String(error),
+          { stage: "pipeline" },
+        );
         this.store.audit("system:pipeline", "event.error", key, {
           error: error instanceof Error ? error.message : String(error),
         });
@@ -183,7 +191,12 @@ export class EventPipeline {
         .get(activity.botId) as any;
       if (!bot) continue;
 
-      const recent = activity.contextMessages.slice(-6);
+      const pending = activity.messages.slice();
+      const recent = this.store.listGroupContext(
+        activity.botId,
+        activity.groupId,
+        6,
+      ) as ActivityMessage[];
       activity.messages = [];
       activity.createdAt = now;
       activity.lastSpoke = now;
@@ -226,7 +239,16 @@ export class EventPipeline {
           activity.botId,
           activity.groupId,
         ).slice(0, 600);
-        if (!clean || /^\[\[?SILENT\]?\]$/i.test(clean)) continue;
+        if (!clean || /^\[\[?SILENT\]?\]$/i.test(clean)) {
+          for (const item of pending)
+            this.store.updateMessageTraceByEventId(
+              item.eventId,
+              "ignored",
+              "AI 判断无需接话",
+              { mode: "lurk" },
+            );
+          continue;
+        }
         this.hub.sendAction(
           activity.botId,
           groupAction(activity.groupId, clean),
@@ -239,6 +261,19 @@ export class EventPipeline {
           now,
         );
         this.cooldowns.set(`${activity.botId}:${activity.groupId}`, now);
+        for (const item of pending)
+          this.store.updateMessageTraceByEventId(
+            item.eventId,
+            "replied",
+            "自动参与群聊",
+            {
+              mode: "lurk",
+              providerId: result.providerId,
+              latencyMs: Number((result as any).latencyMs || 0),
+              inputTokens: Number((result as any).usage?.prompt_tokens || 0),
+              outputTokens: Number((result as any).usage?.completion_tokens || 0),
+            },
+          );
       } catch (error) {
         this.onError(error, `lurk:${activity.botId}:${activity.groupId}`);
         this.store.audit(
@@ -249,6 +284,13 @@ export class EventPipeline {
             error: error instanceof Error ? error.message : String(error),
           },
         );
+        for (const item of pending)
+          this.store.updateMessageTraceByEventId(
+            item.eventId,
+            "error",
+            error instanceof Error ? error.message : String(error),
+            { mode: "lurk" },
+          );
       }
     }
   }
@@ -366,7 +408,7 @@ export class EventPipeline {
       if (value.lastAt < activityCutoff) this.activities.delete(key);
   }
 
-  private async process(botId: string, event: OneBotEvent) {
+  private async process(botId: string, eventId: string, event: OneBotEvent) {
     if (event.post_type !== "message") return;
     const bot = this.store.db
       .prepare("SELECT * FROM bots WHERE id=? AND enabled=1")
@@ -375,6 +417,20 @@ export class EventPipeline {
     const userId = toId(event.user_id);
     const groupId = toId(event.group_id);
     const { text, images, ats } = extract(event.message);
+    const traceId = this.store.createMessageTrace({
+      eventId,
+      botId,
+      groupId: groupId || undefined,
+      userId: userId || undefined,
+      messageId: toId(event.message_id) || undefined,
+      excerpt: text || (images.length ? "[图片]" : ""),
+      imageCount: images.length,
+    });
+    const finish = (
+      decision: string,
+      reason = "",
+      detail: Record<string, unknown> = {},
+    ) => this.store.updateMessageTrace(traceId, decision, reason, detail);
     const globalAdmins = this.store.getSetting<string[]>(
       "global_admin_qqs",
       [],
@@ -382,9 +438,13 @@ export class EventPipeline {
     const isGlobalAdmin = globalAdmins.includes(userId);
     if (event.message_type === "private") {
       this.processPrivate(bot, userId, text, isGlobalAdmin);
+      finish("private", "私聊基础响应");
       return;
     }
-    if (event.message_type !== "group" || !groupId) return;
+    if (event.message_type !== "group" || !groupId) {
+      finish("ignored", "非群聊消息");
+      return;
+    }
 
     const role = event.sender?.role || "member";
     const canManage = isGlobalAdmin || role === "owner" || role === "admin";
@@ -401,6 +461,7 @@ export class EventPipeline {
         botId,
         replyAction(groupId, userId, this.licenseStatus(botId, groupId)),
       );
+      finish("command", "授权状态");
       return;
     }
     if (command === commands.quota) {
@@ -408,6 +469,7 @@ export class EventPipeline {
         botId,
         replyAction(groupId, userId, this.quotaStatus(botId, groupId)),
       );
+      finish("command", "剩余额度");
       return;
     }
     if (command === commands.help) {
@@ -438,6 +500,7 @@ export class EventPipeline {
             customHelp,
         ),
       );
+      finish("command", "帮助");
       return;
     }
     if (command.startsWith(`${commands.activate} `)) {
@@ -446,6 +509,7 @@ export class EventPipeline {
           botId,
           replyAction(groupId, userId, "仅群主、管理员或全局管理员可以激活。"),
         );
+        finish("denied", "缺少群管理权限");
         return;
       }
       const code = command.slice(commands.activate.length).trim();
@@ -466,6 +530,7 @@ export class EventPipeline {
             `激活成功：${license.plan_name}，${this.expiryText(license)}。`,
           ),
         );
+        finish("command", "群授权已激活");
       } catch (error) {
         this.hub.sendAction(
           botId,
@@ -475,12 +540,16 @@ export class EventPipeline {
             error instanceof Error ? error.message : "激活失败",
           ),
         );
+        finish("error", error instanceof Error ? error.message : String(error));
       }
       return;
     }
 
     const license = currentLicense;
-    if (!license?.active) return;
+    if (!license?.active) {
+      finish("ignored", "群未授权或授权已到期");
+      return;
+    }
 
     if (license.features.moderation && role === "member" && !isGlobalAdmin) {
       const nickname = (
@@ -503,6 +572,7 @@ export class EventPipeline {
           nicknameReason,
           `[昵称] ${nickname}`,
         );
+        finish("moderated", nicknameReason);
         return;
       }
 
@@ -559,13 +629,17 @@ export class EventPipeline {
           reason,
           text || "[图片]",
         );
+        finish("moderated", reason);
         return;
       }
     }
 
     const customCommand = this.store.matchCustomCommand(botId, groupId, text);
     if (customCommand) {
-      if (this.inCooldown(`${botId}:${groupId}`)) return;
+      if (this.inCooldown(`${botId}:${groupId}`)) {
+        finish("ignored", "自定义命令处于回复冷却");
+        return;
+      }
       const sender = event.sender?.card || event.sender?.nickname || userId;
       const response = String(customCommand.response_text)
         .replaceAll("{user}", () => sender)
@@ -577,9 +651,12 @@ export class EventPipeline {
       const clean = this.cleanOutbound(response, botId, groupId).slice(0, 4000);
       this.hub.sendAction(botId, replyAction(groupId, userId, clean));
       this.markSpoke(botId, groupId);
+      finish("custom_reply", String(customCommand.trigger_text || ""));
       return;
     }
 
+    const canLurk =
+      license.features.lurk && Boolean(this.defaults().lurkEnabled);
     if ((text || images.length) && !text.startsWith(commands.prefix)) {
       this.recordActivity(
         botId,
@@ -587,29 +664,57 @@ export class EventPipeline {
         event.sender?.card || event.sender?.nickname || userId,
         text,
         images,
+        eventId,
+        traceId,
       );
+      if (canLurk) {
+        finish("queued", "等待群聊停顿后判断是否接话");
+      } else {
+        this.dropPendingActivity(botId, groupId, eventId);
+        finish("ignored", "未触发直接回复，自动接话未启用");
+      }
     }
 
     const mentioned = ats.includes(String(bot.qq));
     const technical = this.isTechnical(text);
     if (!mentioned && !(technical && license.features.tech)) return;
-    if (this.inCooldown(`${botId}:${groupId}`)) return;
+    if (this.inCooldown(`${botId}:${groupId}`)) {
+      finish(
+        canLurk ? "queued" : "ignored",
+        canLurk
+          ? "机器人处于回复冷却，保留为群聊上下文"
+          : "机器人处于回复冷却",
+      );
+      return;
+    }
     const feature: FeatureName = images.length
       ? "vision"
       : technical
         ? "tech"
         : "chat";
-    if (!license.features[feature]) return;
+    if (!license.features[feature]) {
+      finish("ignored", `${feature} 功能未授权`);
+      this.dropPendingActivity(botId, groupId, eventId);
+      return;
+    }
 
     if (
       command === commands.reset ||
       new RegExp(`^${commands.reset}$`, "i").test(text.trim())
     ) {
-      this.histories.delete(`${botId}:${groupId}:${userId}`);
+      this.store.clearConversation(botId, groupId, userId);
       this.hub.sendAction(
         botId,
         replyAction(groupId, userId, "本次会话记忆已清除。"),
       );
+      this.completeActivityReply(
+        botId,
+        groupId,
+        eventId,
+        String(bot.persona || this.defaults().persona || "机器人"),
+        "本次会话记忆已清除。",
+      );
+      finish("command", "会话记忆已清除");
       return;
     }
     if (/^(画|生成|绘制|draw)\s*/i.test(text) && license.features.draw) {
@@ -632,6 +737,14 @@ export class EventPipeline {
           },
         });
         this.markSpoke(botId, groupId);
+        this.completeActivityReply(
+          botId,
+          groupId,
+          eventId,
+          String(bot.persona || this.defaults().persona || "机器人"),
+          "[生成了一张图片]",
+        );
+        finish("replied", "图片生成", { providerId: image.providerId });
       } catch (error) {
         this.hub.sendAction(
           botId,
@@ -641,6 +754,10 @@ export class EventPipeline {
             `生图失败：${error instanceof Error ? error.message : String(error)}`,
           ),
         );
+        finish("error", error instanceof Error ? error.message : String(error), {
+          mode: "image",
+        });
+        this.dropPendingActivity(botId, groupId, eventId);
       }
       return;
     }
@@ -653,8 +770,12 @@ export class EventPipeline {
         defaults,
         technical ? defaults.techPrompt : undefined,
       );
-      const historyKey = `${botId}:${groupId}:${userId}`;
-      const history = this.histories.get(historyKey) || [];
+      const history = this.store.loadConversation(
+        botId,
+        groupId,
+        userId,
+        Math.max(2, defaults.maxHistory || 20),
+      ) as HistoryMessage[];
       const sender = event.sender?.card || event.sender?.nickname || userId;
       const content: unknown = images.length
         ? [
@@ -676,16 +797,38 @@ export class EventPipeline {
         0,
         4000,
       );
-      history.push(
-        { role: "user", content: text || "[图片]" },
-        { role: "assistant", content: clean },
+      this.store.appendConversation(
+        botId,
+        groupId,
+        userId,
+        "user",
+        text || "[图片]",
+        Math.max(2, defaults.maxHistory || 20),
       );
-      this.histories.set(
-        historyKey,
-        history.slice(-Math.max(2, defaults.maxHistory || 20)),
+      this.store.appendConversation(
+        botId,
+        groupId,
+        userId,
+        "assistant",
+        clean,
+        Math.max(2, defaults.maxHistory || 20),
       );
       this.markSpoke(botId, groupId);
       this.hub.sendAction(botId, replyAction(groupId, userId, clean));
+      this.completeActivityReply(
+        botId,
+        groupId,
+        eventId,
+        String(bot.persona || defaults.persona || "机器人"),
+        clean,
+      );
+      finish("replied", mentioned ? "被艾特" : "技术问题自动响应", {
+        mode: technical ? "tech" : images.length ? "vision" : "chat",
+        providerId: result.providerId,
+        latencyMs: Number((result as any).latencyMs || 0),
+        inputTokens: Number((result as any).usage?.prompt_tokens || 0),
+        outputTokens: Number((result as any).usage?.completion_tokens || 0),
+      });
     } catch (error) {
       this.hub.sendAction(
         botId,
@@ -695,6 +838,8 @@ export class EventPipeline {
           `服务暂时不可用：${error instanceof Error ? error.message : String(error)}`,
         ),
       );
+      finish("error", error instanceof Error ? error.message : String(error));
+      this.dropPendingActivity(botId, groupId, eventId);
     }
   }
 
@@ -778,6 +923,8 @@ export class EventPipeline {
     name: string,
     text: string,
     images: string[] = [],
+    eventId?: string,
+    traceId?: string,
   ) {
     const key = `${botId}:${groupId}`;
     const now = Date.now();
@@ -793,8 +940,11 @@ export class EventPipeline {
     activity.lastAt = now;
     const message = {
       name,
+      role: "user" as const,
       text: text.slice(0, 500),
       images: images.slice(0, 4),
+      eventId,
+      traceId,
       at: now,
     };
     activity.messages.push(message);
@@ -802,6 +952,16 @@ export class EventPipeline {
     activity.contextMessages.push(message);
     activity.contextMessages = activity.contextMessages.slice(-20);
     this.activities.set(key, activity);
+    this.store.appendGroupContext({
+      botId,
+      groupId,
+      name,
+      role: "user",
+      text,
+      images,
+      eventId,
+      at: now,
+    });
   }
 
   private recordBotContext(
@@ -815,11 +975,40 @@ export class EventPipeline {
     if (!activity) return;
     activity.contextMessages.push({
       name,
+      role: "assistant",
       text: text.slice(0, 500),
       images: [],
       at,
     });
     activity.contextMessages = activity.contextMessages.slice(-20);
+    this.store.appendGroupContext({
+      botId,
+      groupId,
+      name,
+      role: "assistant",
+      text,
+      at,
+    });
+  }
+
+  private completeActivityReply(
+    botId: string,
+    groupId: string,
+    eventId: string,
+    name: string,
+    text: string,
+    at = Date.now(),
+  ) {
+    this.dropPendingActivity(botId, groupId, eventId);
+    this.recordBotContext(botId, groupId, name, text, at);
+  }
+
+  private dropPendingActivity(botId: string, groupId: string, eventId: string) {
+    const activity = this.activities.get(`${botId}:${groupId}`);
+    if (!activity) return;
+    activity.messages = activity.messages.filter(
+      (message) => message.eventId !== eventId,
+    );
   }
 
   private cleanOutbound(text: string, botId: string, groupId: string) {

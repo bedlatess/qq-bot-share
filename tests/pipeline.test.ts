@@ -115,6 +115,85 @@ test("authorized group activity triggers a quota-bound proactive reply", async (
   }
 });
 
+test("disabled proactive replies leave a final diagnostic instead of a queued trace", async () => {
+  const fixture = await testStore();
+  try {
+    seedBot(fixture.store, { moderation: false, lurk: true });
+    authorizeGroup(fixture.store);
+    fixture.store.setSetting(
+      "bot_defaults",
+      engagementSettings({ lurkEnabled: false }),
+    );
+    const pipeline = new EventPipeline(
+      fixture.store,
+      { sendAction: () => undefined } as any,
+      { chat: async () => ({ text: "不应调用", providerId: "fake" }) } as any,
+      new Moderator(fixture.store, {} as any),
+    );
+
+    await pipeline.enqueue("bot_1", "lurk_disabled_1", {
+      post_type: "message",
+      message_type: "group",
+      group_id: "group_1",
+      user_id: "10001",
+      message_id: 20,
+      message: "今晚吃什么",
+      sender: { nickname: "小明", role: "member" },
+    });
+
+    const trace = fixture.store.db
+      .prepare("SELECT decision,reason FROM message_traces WHERE event_id=?")
+      .get("lurk_disabled_1") as any;
+    assert.equal(trace.decision, "ignored");
+    assert.equal(trace.reason, "未触发直接回复，自动接话未启用");
+  } finally {
+    fixture.close();
+  }
+});
+
+test("silent proactive decisions close queued diagnostics", async () => {
+  const fixture = await testStore();
+  try {
+    seedBot(fixture.store, { moderation: false, lurk: true });
+    authorizeGroup(fixture.store);
+    fixture.store.setSetting(
+      "bot_defaults",
+      engagementSettings({ lurkMinMessages: 1 }),
+    );
+    const actions: unknown[] = [];
+    const pool = {
+      chat: async () => ({ text: "[[SILENT]]", providerId: "fake" }),
+    } as any;
+    const pipeline = new EventPipeline(
+      fixture.store,
+      { sendAction: (_botId: string, action: unknown) => actions.push(action) } as any,
+      pool,
+      new Moderator(fixture.store, pool),
+    );
+    const started = Date.now();
+
+    await pipeline.enqueue("bot_1", "lurk_silent_1", {
+      post_type: "message",
+      message_type: "group",
+      group_id: "group_1",
+      user_id: "10001",
+      message_id: 21,
+      message: "今天挺安静",
+      sender: { nickname: "小明", role: "member" },
+    });
+    await pipeline.tick(started + 4_000);
+
+    const trace = fixture.store.db
+      .prepare("SELECT decision,reason FROM message_traces WHERE event_id=?")
+      .get("lurk_silent_1") as any;
+    assert.equal(actions.length, 0);
+    assert.equal(trace.decision, "ignored");
+    assert.equal(trace.reason, "AI 判断无需接话");
+  } finally {
+    fixture.close();
+  }
+});
+
 test("contextual replies preserve group images for vision and follow-up questions", async () => {
   const fixture = await testStore();
   try {
@@ -287,6 +366,78 @@ test("technical replies retain bot persona and base prompt", async () => {
     assert.match(systemPrompt, /内部身份约束/);
     assert.match(systemPrompt, /机器人专属基础人格/);
     assert.match(systemPrompt, /技术附加规则/);
+  } finally {
+    fixture.close();
+  }
+});
+
+test("conversation memory and diagnostics survive pipeline recreation", async () => {
+  const fixture = await testStore();
+  try {
+    seedBot(fixture.store, { moderation: false, tech: true });
+    authorizeGroup(fixture.store);
+    fixture.store.setSetting("bot_defaults", engagementSettings({ maxHistory: 10 }));
+    const calls: any[][] = [];
+    const pool = {
+      chat: async (messages: any[]) => {
+        calls.push(messages);
+        return {
+          text: calls.length === 1 ? "先检查 Docker 日志" : "继续检查端口映射",
+          providerId: "fake",
+          latencyMs: 120,
+          usage: { prompt_tokens: 20, completion_tokens: 8 },
+        };
+      },
+    } as any;
+    const hub = { sendAction: () => undefined } as any;
+    const send = (pipeline: EventPipeline, id: string, text: string) =>
+      pipeline.enqueue("bot_1", id, {
+        post_type: "message",
+        message_type: "group",
+        group_id: "group_1",
+        user_id: "10001",
+        message_id: id,
+        message: text,
+        sender: { nickname: "测试成员", role: "member" },
+      });
+
+    const first = new EventPipeline(
+      fixture.store,
+      hub,
+      pool,
+      new Moderator(fixture.store, pool),
+    );
+    await send(first, "memory_1", "Docker 怎么检查启动错误");
+    await first.tick(Date.now() + 20_000);
+    assert.equal(calls.length, 1);
+
+    const recreated = new EventPipeline(
+      fixture.store,
+      hub,
+      pool,
+      new Moderator(fixture.store, pool),
+    );
+    await send(recreated, "memory_2", "Docker 这个问题怎么继续排查");
+
+    assert.equal(calls.length, 2);
+    assert.ok(
+      calls[1].some(
+        (item) => item.role === "assistant" && item.content === "先检查 Docker 日志",
+      ),
+    );
+    const traces = fixture.store.db
+      .prepare(
+        "SELECT event_id,decision,provider_id,latency_ms FROM message_traces ORDER BY created_at",
+      )
+      .all() as any[];
+    assert.deepEqual(
+      traces.map((item) => [item.event_id, item.decision, item.provider_id]),
+      [
+        ["memory_1", "replied", "fake"],
+        ["memory_2", "replied", "fake"],
+      ],
+    );
+    assert.equal(traces[0].latency_ms, 120);
   } finally {
     fixture.close();
   }

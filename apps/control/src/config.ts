@@ -22,6 +22,7 @@ export function loadConfig() {
     port: integer('PORT', 17866),
     dataDir: resolve(process.env.DATA_DIR || resolve(root, 'data')),
     publicDir: resolve(process.env.PUBLIC_DIR || resolve(root, 'apps/control/public')),
+    agentBundlePath: resolve(process.env.AGENT_BUNDLE_PATH || resolve(root, 'puff-agent-update.tar.gz')),
     publicUrl: process.env.PUBLIC_URL || 'http://127.0.0.1:17866',
     adminEmail: (process.env.ADMIN_EMAIL || 'admin@example.com').trim().toLowerCase(),
     adminPassword: process.env.ADMIN_PASSWORD || 'change-this-password',
@@ -32,4 +33,3 @@ export function loadConfig() {
     isProduction: process.env.NODE_ENV === 'production',
   };
 }
-

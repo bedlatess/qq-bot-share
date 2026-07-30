@@ -216,6 +216,84 @@ export class Store {
       );
       CREATE INDEX IF NOT EXISTS idx_custom_commands_scope
         ON custom_commands(enabled,bot_id,group_id,updated_at);
+      CREATE TABLE IF NOT EXISTS conversation_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+        group_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        role TEXT NOT NULL CHECK(role IN ('user','assistant')),
+        content TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_conversation_thread
+        ON conversation_messages(bot_id,group_id,user_id,id DESC);
+      CREATE TABLE IF NOT EXISTS conversation_summaries (
+        bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+        group_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        summary TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(bot_id,group_id,user_id)
+      );
+      CREATE TABLE IF NOT EXISTS group_context_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+        group_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        role TEXT NOT NULL CHECK(role IN ('user','assistant')),
+        text TEXT NOT NULL,
+        images_json TEXT NOT NULL DEFAULT '[]',
+        event_id TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_group_context
+        ON group_context_messages(bot_id,group_id,id DESC);
+      CREATE TABLE IF NOT EXISTS message_traces (
+        id TEXT PRIMARY KEY,
+        event_id TEXT NOT NULL UNIQUE,
+        bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+        group_id TEXT,
+        user_id TEXT,
+        message_id TEXT,
+        excerpt TEXT NOT NULL DEFAULT '',
+        image_count INTEGER NOT NULL DEFAULT 0,
+        decision TEXT NOT NULL DEFAULT 'received',
+        reason TEXT NOT NULL DEFAULT '',
+        provider_id TEXT,
+        latency_ms INTEGER NOT NULL DEFAULT 0,
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        detail_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_message_traces_created
+        ON message_traces(created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_message_traces_scope
+        ON message_traces(bot_id,group_id,decision,created_at DESC);
+      CREATE TABLE IF NOT EXISTS bot_groups (
+        bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+        group_id TEXT NOT NULL,
+        group_name TEXT NOT NULL DEFAULT '',
+        member_count INTEGER NOT NULL DEFAULT 0,
+        max_member_count INTEGER NOT NULL DEFAULT 0,
+        bot_role TEXT NOT NULL DEFAULT 'unknown',
+        last_seen_at TEXT NOT NULL,
+        PRIMARY KEY(bot_id,group_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_bot_groups_name
+        ON bot_groups(group_name,group_id);
+      CREATE TABLE IF NOT EXISTS provider_health_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        provider_id TEXT NOT NULL REFERENCES ai_providers(id) ON DELETE CASCADE,
+        source TEXT NOT NULL,
+        healthy INTEGER NOT NULL,
+        latency_ms INTEGER NOT NULL DEFAULT 0,
+        error TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_provider_health_created
+        ON provider_health_events(provider_id,created_at DESC);
     `);
     const usageColumns = this.db
       .prepare("PRAGMA table_info(usage_events)")
@@ -679,6 +757,326 @@ export class Store {
          ORDER BY (bot_id IS NOT NULL)+(group_id IS NOT NULL) DESC,updated_at DESC`,
       )
       .all(botId, groupId) as Array<Record<string, unknown>>;
+  }
+
+  loadConversation(botId: string, groupId: string, userId: string, limit = 20) {
+    const messages = (
+      this.db
+        .prepare(
+          `SELECT role,content FROM conversation_messages
+           WHERE bot_id=? AND group_id=? AND user_id=?
+           ORDER BY id DESC LIMIT ?`,
+        )
+        .all(botId, groupId, userId, Math.max(2, Math.min(100, limit))) as Array<{
+        role: "user" | "assistant";
+        content: string;
+      }>
+    ).reverse();
+    const summary = this.db
+      .prepare(
+        "SELECT summary FROM conversation_summaries WHERE bot_id=? AND group_id=? AND user_id=?",
+      )
+      .get(botId, groupId, userId) as { summary: string } | undefined;
+    return summary?.summary
+      ? [
+          {
+            role: "user" as const,
+            content: `[较早会话记忆]\n${summary.summary}`,
+          },
+          ...messages,
+        ]
+      : messages;
+  }
+
+  appendConversation(
+    botId: string,
+    groupId: string,
+    userId: string,
+    role: "user" | "assistant",
+    content: string,
+    maxMessages = 20,
+  ) {
+    this.db.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO conversation_messages
+           (bot_id,group_id,user_id,role,content,created_at) VALUES (?,?,?,?,?,?)`,
+        )
+        .run(botId, groupId, userId, role, content.slice(0, 8000), nowIso());
+      const keep = Math.max(2, Math.min(100, maxMessages));
+      const overflow = this.db
+        .prepare(
+          `SELECT id,role,content FROM conversation_messages
+           WHERE bot_id=? AND group_id=? AND user_id=? AND id NOT IN (
+             SELECT id FROM conversation_messages
+             WHERE bot_id=? AND group_id=? AND user_id=?
+             ORDER BY id DESC LIMIT ?
+           ) ORDER BY id`,
+        )
+        .all(botId, groupId, userId, botId, groupId, userId, keep) as Array<{
+        id: number;
+        role: string;
+        content: string;
+      }>;
+      if (overflow.length) {
+        const existing = this.db
+          .prepare(
+            "SELECT summary FROM conversation_summaries WHERE bot_id=? AND group_id=? AND user_id=?",
+          )
+          .get(botId, groupId, userId) as { summary: string } | undefined;
+        const addition = overflow
+          .map((item) => `${item.role === "assistant" ? "机器人" : "用户"}: ${item.content.slice(0, 240)}`)
+          .join("\n");
+        const summary = `${existing?.summary || ""}\n${addition}`.trim().slice(-1600);
+        this.db
+          .prepare(
+            `INSERT INTO conversation_summaries
+             (bot_id,group_id,user_id,summary,updated_at) VALUES (?,?,?,?,?)
+             ON CONFLICT(bot_id,group_id,user_id) DO UPDATE SET
+               summary=excluded.summary,updated_at=excluded.updated_at`,
+          )
+          .run(botId, groupId, userId, summary, nowIso());
+      }
+      this.db
+        .prepare(
+          `DELETE FROM conversation_messages
+           WHERE bot_id=? AND group_id=? AND user_id=? AND id NOT IN (
+             SELECT id FROM conversation_messages
+             WHERE bot_id=? AND group_id=? AND user_id=?
+             ORDER BY id DESC LIMIT ?
+           )`,
+        )
+        .run(
+          botId,
+          groupId,
+          userId,
+          botId,
+          groupId,
+          userId,
+          keep,
+        );
+    })();
+  }
+
+  clearConversation(botId: string, groupId: string, userId: string) {
+    return this.db.transaction(() => {
+      const deleted = this.db
+        .prepare(
+          "DELETE FROM conversation_messages WHERE bot_id=? AND group_id=? AND user_id=?",
+        )
+        .run(botId, groupId, userId).changes;
+      this.db
+        .prepare(
+          "DELETE FROM conversation_summaries WHERE bot_id=? AND group_id=? AND user_id=?",
+        )
+        .run(botId, groupId, userId);
+      return deleted;
+    })();
+  }
+
+  appendGroupContext(input: {
+    botId: string;
+    groupId: string;
+    name: string;
+    role: "user" | "assistant";
+    text: string;
+    images?: string[];
+    eventId?: string;
+    at?: number;
+  }) {
+    this.db.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO group_context_messages
+           (bot_id,group_id,name,role,text,images_json,event_id,created_at)
+           VALUES (?,?,?,?,?,?,?,?)`,
+        )
+        .run(
+          input.botId,
+          input.groupId,
+          input.name.slice(0, 100),
+          input.role,
+          input.text.slice(0, 1000),
+          JSON.stringify((input.images || []).slice(0, 4)),
+          input.eventId || null,
+          new Date(input.at || Date.now()).toISOString(),
+        );
+      this.db
+        .prepare(
+          `DELETE FROM group_context_messages
+           WHERE bot_id=? AND group_id=? AND id NOT IN (
+             SELECT id FROM group_context_messages
+             WHERE bot_id=? AND group_id=? ORDER BY id DESC LIMIT 40
+           )`,
+        )
+        .run(input.botId, input.groupId, input.botId, input.groupId);
+    })();
+  }
+
+  listGroupContext(botId: string, groupId: string, limit = 12) {
+    return (
+      this.db
+        .prepare(
+          `SELECT name,role,text,images_json,event_id,created_at
+           FROM group_context_messages WHERE bot_id=? AND group_id=?
+           ORDER BY id DESC LIMIT ?`,
+        )
+        .all(botId, groupId, Math.max(1, Math.min(40, limit))) as any[]
+    )
+      .reverse()
+      .map((row) => ({
+        name: String(row.name),
+        role: row.role as "user" | "assistant",
+        text: String(row.text),
+        images: (() => {
+          try {
+            return JSON.parse(String(row.images_json)) as string[];
+          } catch {
+            return [];
+          }
+        })(),
+        eventId: row.event_id ? String(row.event_id) : undefined,
+        at: Date.parse(String(row.created_at)),
+      }));
+  }
+
+  createMessageTrace(input: {
+    eventId: string;
+    botId: string;
+    groupId?: string;
+    userId?: string;
+    messageId?: string;
+    excerpt?: string;
+    imageCount?: number;
+  }) {
+    const id = randomId("trace_");
+    const now = nowIso();
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO message_traces
+         (id,event_id,bot_id,group_id,user_id,message_id,excerpt,image_count,created_at,updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?)`,
+      )
+      .run(
+        id,
+        input.eventId,
+        input.botId,
+        input.groupId || null,
+        input.userId || null,
+        input.messageId || null,
+        (input.excerpt || "").slice(0, 500),
+        Math.max(0, Number(input.imageCount || 0)),
+        now,
+        now,
+      );
+    return (
+      this.db.prepare("SELECT id FROM message_traces WHERE event_id=?").get(input.eventId) as
+        | { id: string }
+        | undefined
+    )?.id;
+  }
+
+  updateMessageTrace(
+    id: string | undefined,
+    decision: string,
+    reason = "",
+    detail: {
+      providerId?: string;
+      latencyMs?: number;
+      inputTokens?: number;
+      outputTokens?: number;
+      [key: string]: unknown;
+    } = {},
+  ) {
+    if (!id) return;
+    this.db
+      .prepare(
+        `UPDATE message_traces SET decision=?,reason=?,provider_id=?,latency_ms=?,
+         input_tokens=?,output_tokens=?,detail_json=?,updated_at=? WHERE id=?`,
+      )
+      .run(
+        decision,
+        reason.slice(0, 500),
+        detail.providerId || null,
+        Math.max(0, Number(detail.latencyMs || 0)),
+        Math.max(0, Number(detail.inputTokens || 0)),
+        Math.max(0, Number(detail.outputTokens || 0)),
+        JSON.stringify(detail),
+        nowIso(),
+        id,
+      );
+  }
+
+  updateMessageTraceByEventId(
+    eventId: string | undefined,
+    decision: string,
+    reason = "",
+    detail: {
+      providerId?: string;
+      latencyMs?: number;
+      inputTokens?: number;
+      outputTokens?: number;
+      [key: string]: unknown;
+    } = {},
+  ) {
+    if (!eventId) return;
+    const row = this.db
+      .prepare("SELECT id FROM message_traces WHERE event_id=?")
+      .get(eventId) as { id: string } | undefined;
+    this.updateMessageTrace(row?.id, decision, reason, detail);
+  }
+
+  syncBotGroups(botId: string, groups: Array<Record<string, unknown>>) {
+    const now = nowIso();
+    this.db.transaction(() => {
+      const upsert = this.db.prepare(
+        `INSERT INTO bot_groups
+         (bot_id,group_id,group_name,member_count,max_member_count,bot_role,last_seen_at)
+         VALUES (?,?,?,?,?,?,?)
+         ON CONFLICT(bot_id,group_id) DO UPDATE SET
+           group_name=excluded.group_name,member_count=excluded.member_count,
+           max_member_count=excluded.max_member_count,bot_role=excluded.bot_role,
+           last_seen_at=excluded.last_seen_at`,
+      );
+      for (const group of groups) {
+        const groupId = String(group.group_id || "");
+        if (!/^\d{5,15}$/.test(groupId)) continue;
+        upsert.run(
+          botId,
+          groupId,
+          String(group.group_name || ""),
+          Math.max(0, Number(group.member_count || 0)),
+          Math.max(0, Number(group.max_member_count || 0)),
+          String(group.bot_role || group.role || "unknown"),
+          now,
+        );
+      }
+      this.db
+        .prepare("DELETE FROM bot_groups WHERE bot_id=? AND last_seen_at<>?")
+        .run(botId, now);
+    })();
+  }
+
+  recordProviderHealth(
+    providerId: string,
+    source: "call" | "probe",
+    healthy: boolean,
+    latencyMs: number,
+    error = "",
+  ) {
+    this.db
+      .prepare(
+        `INSERT INTO provider_health_events
+         (provider_id,source,healthy,latency_ms,error,created_at) VALUES (?,?,?,?,?,?)`,
+      )
+      .run(
+        providerId,
+        source,
+        healthy ? 1 : 0,
+        Math.max(0, latencyMs),
+        error.slice(0, 500),
+        nowIso(),
+      );
   }
 
   audit(actor: string, action: string, target?: string, detail: unknown = {}) {

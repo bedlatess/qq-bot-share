@@ -30,6 +30,26 @@ while ($true) {
     ($_ | Out-String) | Out-File -LiteralPath $LogPath -Append
   }
 
+  if ($ExitCode -eq 75) {
+    $PendingUpdate = Join-Path $RepoRoot "data\pending-agent-update.json"
+    $UpdateScript = Join-Path $RepoRoot "scripts\windows\update-agent.ps1"
+    if ((Test-Path -LiteralPath $PendingUpdate) -and (Test-Path -LiteralPath $UpdateScript)) {
+      try {
+        "[{0}] applying queued agent update" -f (Get-Date).ToString("yyyy-MM-dd HH:mm:ss") |
+          Out-File -LiteralPath $LogPath -Append
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $UpdateScript `
+          -PendingPath $PendingUpdate -ConfigPath $ConfigPath *>> $LogPath
+        if ($LASTEXITCODE -ne 0) {
+          throw "Agent update process exited with code $LASTEXITCODE."
+        }
+        $ExitCode = 0
+      } catch {
+        ($_ | Out-String) | Out-File -LiteralPath $LogPath -Append
+        $ExitCode = 1
+      }
+    }
+  }
+
   $RuntimeSeconds = [Math]::Round(((Get-Date) - $StartedAt).TotalSeconds, 1)
   (
     "[{0}] agent stopped: exit={1}, runtime={2}s; restarting in {3}s" -f `

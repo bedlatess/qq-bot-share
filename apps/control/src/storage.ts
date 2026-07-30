@@ -70,6 +70,25 @@ export class StorageManager {
       moderationEvents: this.store.db
         .prepare("DELETE FROM moderation_events WHERE created_at < ?")
         .run(evidenceCutoff).changes,
+      messageTraces: this.store.db
+        .prepare("DELETE FROM message_traces WHERE created_at < ?")
+        .run(operationalCutoff).changes,
+      groupContext: this.store.db
+        .prepare("DELETE FROM group_context_messages WHERE created_at < ?")
+        .run(operationalCutoff).changes,
+      conversations: this.store.db
+        .prepare(
+          "DELETE FROM conversation_messages WHERE created_at < datetime('now','-14 days')",
+        )
+        .run().changes,
+      conversationSummaries: this.store.db
+        .prepare(
+          "DELETE FROM conversation_summaries WHERE updated_at < datetime('now','-30 days')",
+        )
+        .run().changes,
+      providerHealth: this.store.db
+        .prepare("DELETE FROM provider_health_events WHERE created_at < ?")
+        .run(operationalCutoff).changes,
       filesDeleted: 0,
     };
     this.rotateBackups();

@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+export const PUFF_VERSION = '2.1.0';
+
 export const featureNames = [
   'chat',
   'tech',
@@ -108,6 +110,13 @@ export type ControlNapCatRequest = {
   operation: 'status' | 'qrcode' | 'refresh_qrcode' | 'restart';
 };
 
+export type ControlBotRequest = {
+  type: 'bot_request';
+  requestId: string;
+  botId: string;
+  operation: 'groups';
+};
+
 export type AgentNapCatResponse = {
   type: 'napcat_response';
   requestId: string;
@@ -116,8 +125,26 @@ export type AgentNapCatResponse = {
   error?: string;
 };
 
-export type AgentMessage = AgentHello | AgentEvent | AgentHeartbeat | AgentNapCatResponse;
-export type ControlMessage = ControlAction | ControlNapCatRequest | { type: 'hello_ack'; at: number };
+export type AgentBotResponse = {
+  type: 'bot_response';
+  requestId: string;
+  ok: boolean;
+  data?: unknown;
+  error?: string;
+};
+
+export type AgentUpdateManifest = {
+  version: string;
+  url: string;
+  sha256: string;
+};
+
+export type AgentMessage = AgentHello | AgentEvent | AgentHeartbeat | AgentNapCatResponse | AgentBotResponse;
+export type ControlMessage =
+  | ControlAction
+  | ControlNapCatRequest
+  | ControlBotRequest
+  | { type: 'hello_ack'; at: number; update?: AgentUpdateManifest };
 
 export function toId(value: string | number | undefined | null): string {
   return value == null ? '' : String(value);
@@ -126,4 +153,3 @@ export function toId(value: string | number | undefined | null): string {
 export function nowIso(): string {
   return new Date().toISOString();
 }
-

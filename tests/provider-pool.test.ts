@@ -104,6 +104,18 @@ test("provider pool fails over in priority order and records health", async () =
       ).count,
       1,
     );
+    const samples = fixture.store.db
+      .prepare(
+        "SELECT source,healthy FROM provider_health_events ORDER BY id",
+      )
+      .all() as any[];
+    assert.deepEqual(
+      samples.map((item) => [item.source, item.healthy]),
+      [
+        ["call", 0],
+        ["call", 1],
+      ],
+    );
   } finally {
     fixture.close();
     await new Promise<void>((resolve) => server.close(() => resolve()));

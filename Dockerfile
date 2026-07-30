@@ -9,6 +9,14 @@ COPY packages/shared/package.json packages/shared/package.json
 RUN npm ci
 COPY . .
 RUN npm run build
+RUN tar -czf /app/puff-agent-update.tar.gz \
+      package.json package-lock.json \
+      tsconfig.base.json \
+      apps/agent/package.json apps/agent/tsconfig.json apps/agent/agent.config.example.json \
+      apps/agent/src apps/agent/dist \
+      packages/shared/package.json packages/shared/tsconfig.json \
+      packages/shared/src packages/shared/dist \
+      scripts/windows
 
 FROM node:22-bookworm-slim AS runtime
 ENV NODE_ENV=production \
@@ -27,6 +35,7 @@ COPY --from=build /app/apps/control/dist apps/control/dist
 COPY --from=build /app/apps/control/public apps/control/public
 COPY --from=build /app/packages/shared/package.json packages/shared/package.json
 COPY --from=build /app/packages/shared/dist packages/shared/dist
+COPY --from=build /app/puff-agent-update.tar.gz puff-agent-update.tar.gz
 RUN chmod 0644 package.json package-lock.json \
       apps/control/package.json apps/agent/package.json apps/web/package.json \
       packages/shared/package.json \

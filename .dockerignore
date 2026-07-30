@@ -6,3 +6,6 @@ spool
 .env*
 tests
 docs
+test-results
+playwright-report
+coverage

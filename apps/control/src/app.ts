@@ -1,10 +1,11 @@
-import { existsSync } from "node:fs";
+import { createReadStream, existsSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import cookie from "@fastify/cookie";
 import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
-import { defaultFeatures, nowIso } from "@puff/shared";
+import { defaultFeatures, nowIso, PUFF_VERSION } from "@puff/shared";
 import { z } from "zod";
 import type { AppConfig } from "./config.js";
 import { Store } from "./db.js";
@@ -41,9 +42,20 @@ export async function buildApp(config: AppConfig) {
     logger: { level: config.logLevel },
     bodyLimit: 4 * 1024 * 1024,
   });
+  const agentBundlePath =
+    config.agentBundlePath || join(process.cwd(), "puff-agent-update.tar.gz");
   const store = new Store(join(config.dataDir, "puff.sqlite"));
   await store.bootstrap(config.adminEmail, config.adminPassword);
-  const hub = new AgentHub(store);
+  const agentUpdate = existsSync(agentBundlePath)
+    ? {
+        version: PUFF_VERSION,
+        url: `${config.publicUrl.replace(/\/+$/, "")}/agent-update`,
+        sha256: createHash("sha256")
+          .update(readFileSync(agentBundlePath))
+          .digest("hex"),
+      }
+    : undefined;
+  const hub = new AgentHub(store, agentUpdate);
   const pool = new ProviderPool(store, config.masterKey);
   const moderator = new Moderator(store, pool);
   const pipeline = new EventPipeline(
@@ -63,6 +75,7 @@ export async function buildApp(config: AppConfig) {
   hub.onEvent = (botId, eventId, event) =>
     pipeline.enqueue(botId, eventId, event);
   pipeline.start();
+  pool.startHealthMonitor();
 
   await app.register(cookie, {
     secret: config.sessionSecret,
@@ -119,7 +132,7 @@ export async function buildApp(config: AppConfig) {
   app.get("/api/health", async () => ({
     ok: true,
     time: nowIso(),
-    version: "2.0.0",
+    version: PUFF_VERSION,
     storage: storage.usage(),
   }));
 
@@ -291,6 +304,8 @@ export async function buildApp(config: AppConfig) {
   registerCardRoutes(app, store);
   registerProviderRoutes(app, store, pool, config.masterKey);
   registerCustomCommandRoutes(app, store);
+  registerGroupRoutes(app, store, hub);
+  registerDiagnosticRoutes(app, store);
   registerSettingsRoutes(app, store);
   registerLogRoutes(app, store, storage);
 
@@ -306,6 +321,29 @@ export async function buildApp(config: AppConfig) {
       return;
     }
     hub.attach(query.data.nodeId, socket);
+  });
+
+  app.get("/agent-update", async (request, reply) => {
+    const query = z
+      .object({ nodeId: z.string().min(1) })
+      .safeParse(request.query);
+    const authorization = String(request.headers.authorization || "");
+    const token = authorization.startsWith("Bearer ")
+      ? authorization.slice(7).trim()
+      : "";
+    if (
+      !query.success ||
+      !token ||
+      !hub.authenticate(query.data.nodeId, token) ||
+      !existsSync(agentBundlePath)
+    )
+      return reply.code(404).send({ ok: false, error: "Not found" });
+    return reply
+      .type("application/gzip")
+      .header("content-disposition", `attachment; filename="puff-agent-${PUFF_VERSION}.tar.gz"`)
+      .header("x-puff-version", PUFF_VERSION)
+      .header("x-puff-sha256", agentUpdate?.sha256 || "")
+      .send(createReadStream(agentBundlePath));
   });
 
   if (existsSync(config.publicDir)) {
@@ -327,8 +365,43 @@ export async function buildApp(config: AppConfig) {
 
   const cleanupTimer = setInterval(() => storage.cleanup(), 6 * 60 * 60 * 1000);
   cleanupTimer.unref();
+  let syncingGroups = false;
+  const syncOnlineGroups = async () => {
+    if (syncingGroups) return;
+    syncingGroups = true;
+    try {
+      const bots = store.db
+        .prepare(
+          `SELECT id FROM bots WHERE enabled=1 AND status='online'
+           AND julianday(last_seen_at)>=julianday('now','-45 seconds')`,
+        )
+        .all() as Array<{ id: string }>;
+      for (const bot of bots) {
+        try {
+          const payload = await hub.requestBotGroups(bot.id);
+          const groups = Array.isArray(payload)
+            ? payload
+            : Array.isArray((payload as any)?.data)
+              ? (payload as any).data
+              : [];
+          store.syncBotGroups(bot.id, groups as Array<Record<string, unknown>>);
+        } catch (error) {
+          app.log.warn({ err: error, botId: bot.id }, "group sync failed");
+        }
+      }
+    } finally {
+      syncingGroups = false;
+    }
+  };
+  const initialGroupSync = setTimeout(() => void syncOnlineGroups(), 90_000);
+  const groupSyncTimer = setInterval(() => void syncOnlineGroups(), 10 * 60 * 1000);
+  initialGroupSync.unref();
+  groupSyncTimer.unref();
   app.addHook("onClose", async () => {
     clearInterval(cleanupTimer);
+    clearTimeout(initialGroupSync);
+    clearInterval(groupSyncTimer);
+    pool.stopHealthMonitor();
     pipeline.stop();
     store.close();
   });
@@ -711,13 +784,33 @@ function registerProviderRoutes(
       store.db
         .prepare("SELECT * FROM ai_providers ORDER BY priority,created_at")
         .all() as any[]
-    ).map((row) => ({
-      ...row,
-      api_key_enc: undefined,
-      apiKeyMasked: row.api_key_enc ? "已配置" : "未配置",
-      enabled: boolean(row.enabled),
-      capabilities: parseJson(row.capabilities_json),
-    }));
+    ).map((row) => {
+      const cutoff = new Date(Date.now() - 86400000).toISOString();
+      const health = store.db
+        .prepare(
+          `SELECT COUNT(*) samples,COALESCE(SUM(healthy),0) successes,
+           COALESCE(ROUND(AVG(CASE WHEN healthy=1 THEN latency_ms END)),0) avg_latency_ms,
+           MAX(created_at) last_checked_at
+           FROM provider_health_events WHERE provider_id=? AND created_at>=?`,
+        )
+        .get(row.id, cutoff) as any;
+      const samples = Number(health?.samples || 0);
+      return {
+        ...row,
+        api_key_enc: undefined,
+        apiKeyMasked: row.api_key_enc ? "已配置" : "未配置",
+        enabled: boolean(row.enabled),
+        capabilities: parseJson(row.capabilities_json),
+        health24h: {
+          samples,
+          successRate: samples
+            ? Math.round((Number(health.successes || 0) / samples) * 1000) / 10
+            : null,
+          averageLatencyMs: Number(health?.avg_latency_ms || 0),
+          lastCheckedAt: health?.last_checked_at || null,
+        },
+      };
+    });
   app.get("/api/providers", async () => ({ ok: true, data: publicRows() }));
   app.post("/api/providers", async (request: any) => {
     const body = z
@@ -891,6 +984,103 @@ function registerCustomCommandRoutes(app: any, store: Store) {
       request.params.id,
     );
     return { ok: true };
+  });
+}
+
+function registerGroupRoutes(app: any, store: Store, hub: AgentHub) {
+  app.get("/api/groups", async (request: any) => {
+    const query = z
+      .object({ botId: z.string().optional() })
+      .parse(request.query);
+    const rows = query.botId
+      ? store.db
+          .prepare(
+            `SELECT g.*,b.name bot_name,b.qq,l.id license_id,l.status license_status,
+             l.expires_at,l.permanent,p.name plan_name
+             FROM bot_groups g JOIN bots b ON b.id=g.bot_id
+             LEFT JOIN group_licenses l ON l.bot_id=g.bot_id AND l.group_id=g.group_id
+             LEFT JOIN plans p ON p.id=l.plan_id
+             WHERE g.bot_id=? ORDER BY g.group_name,g.group_id`,
+          )
+          .all(query.botId)
+      : store.db
+          .prepare(
+            `SELECT g.*,b.name bot_name,b.qq,l.id license_id,l.status license_status,
+             l.expires_at,l.permanent,p.name plan_name
+             FROM bot_groups g JOIN bots b ON b.id=g.bot_id
+             LEFT JOIN group_licenses l ON l.bot_id=g.bot_id AND l.group_id=g.group_id
+             LEFT JOIN plans p ON p.id=l.plan_id
+             ORDER BY b.name,g.group_name,g.group_id`,
+          )
+          .all();
+    return { ok: true, data: rows };
+  });
+
+  app.post("/api/bots/:id/sync-groups", async (request: any) => {
+    const botId = z.string().parse(request.params.id);
+    const payload = await hub.requestBotGroups(botId);
+    const groups = Array.isArray(payload)
+      ? payload
+      : Array.isArray((payload as any)?.data)
+        ? (payload as any).data
+        : [];
+    store.syncBotGroups(botId, groups as Array<Record<string, unknown>>);
+    store.audit(`admin:${request.admin.email}`, "bot.groups.sync", botId, {
+      count: groups.length,
+    });
+    return { ok: true, data: { count: groups.length } };
+  });
+}
+
+function registerDiagnosticRoutes(app: any, store: Store) {
+  app.get("/api/diagnostics", async (request: any) => {
+    const query = z
+      .object({
+        botId: z.string().optional(),
+        groupId: z.string().optional(),
+        decision: z.string().optional(),
+        limit: z.coerce.number().int().min(1).max(500).default(100),
+      })
+      .parse(request.query);
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (query.botId) {
+      where.push("t.bot_id=?");
+      params.push(query.botId);
+    }
+    if (query.groupId) {
+      where.push("t.group_id=?");
+      params.push(query.groupId);
+    }
+    if (query.decision) {
+      where.push("t.decision=?");
+      params.push(query.decision);
+    }
+    const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+    const rows = store.db
+      .prepare(
+        `SELECT t.*,b.name bot_name,b.qq,p.name provider_name
+         FROM message_traces t JOIN bots b ON b.id=t.bot_id
+         LEFT JOIN ai_providers p ON p.id=t.provider_id
+         ${clause} ORDER BY t.created_at DESC LIMIT ?`,
+      )
+      .all(...params, query.limit);
+    const cutoff = new Date(Date.now() - 86400000).toISOString();
+    const counts = store.db
+      .prepare(
+        `SELECT decision,COUNT(*) count FROM message_traces
+         WHERE created_at>=? GROUP BY decision ORDER BY count DESC`,
+      )
+      .all(cutoff);
+    return { ok: true, data: { rows, counts } };
+  });
+
+  app.delete("/api/diagnostics", async (request: any) => {
+    const deleted = store.db.prepare("DELETE FROM message_traces").run().changes;
+    store.audit(`admin:${request.admin.email}`, "diagnostics.clear", undefined, {
+      deleted,
+    });
+    return { ok: true, data: { deleted } };
   });
 }
 

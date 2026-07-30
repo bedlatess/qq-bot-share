@@ -4,6 +4,7 @@
   "controlUrl": "ws://YOUR_DEBIAN_IP:17866/agent",
   "spoolDir": "./spool",
   "spoolLimitBytes": 52428800,
+  "autoUpdate": true,
   "bots": [
     {
       "id": "bot_replace_me",
@@ -14,4 +15,3 @@
     }
   ]
 }
-
