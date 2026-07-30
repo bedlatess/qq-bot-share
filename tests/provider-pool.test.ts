@@ -2,9 +2,30 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import test from "node:test";
 import { nowIso } from "@puff/shared";
-import { ProviderPool } from "../apps/control/src/provider-pool.js";
+import {
+  chatRequestPolicy,
+  ProviderPool,
+} from "../apps/control/src/provider-pool.js";
 import { encryptSecret } from "../apps/control/src/security.js";
 import { seedBot, testStore } from "./helpers.js";
+
+test("chat request policy keeps short replies fast without truncating technical answers", () => {
+  assert.deepEqual(chatRequestPolicy("lurk", 30_000), {
+    maxTokens: 256,
+    temperature: 0.75,
+    timeoutMs: 6_000,
+  });
+  assert.deepEqual(chatRequestPolicy("chat", 30_000), {
+    maxTokens: 512,
+    temperature: 0.75,
+    timeoutMs: 6_000,
+  });
+  assert.deepEqual(chatRequestPolicy("tech", 30_000), {
+    maxTokens: 2_048,
+    temperature: 0.35,
+    timeoutMs: 30_000,
+  });
+});
 
 test("provider pool fails over in priority order and records health", async () => {
   const server = createServer((request, response) => {

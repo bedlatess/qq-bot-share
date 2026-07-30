@@ -177,14 +177,14 @@ export class EventPipeline {
         .get(activity.botId) as any;
       if (!bot) continue;
 
-      const recent = activity.messages.slice(-12);
+      const recent = activity.messages.slice(-6);
       activity.messages = [];
       activity.createdAt = now;
       activity.lastSpoke = now;
       try {
         this.store.assertQuotaAvailable(activity.botId, activity.groupId);
         const transcript = recent
-          .map((item) => `${item.name}: ${item.text}`)
+          .map((item) => `${item.name}: ${item.text.slice(0, 240)}`)
           .join("\n");
         const result = await this.pool.chat(
           [

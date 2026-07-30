@@ -33,6 +33,16 @@ function modelCapabilities(model: string) {
   };
 }
 
+export function chatRequestPolicy(kind: string, providerTimeoutMs: number) {
+  const moderation = kind.includes('moderation');
+  const shortReply = kind === 'chat' || kind === 'lurk' || kind === 'idle';
+  return {
+    maxTokens: moderation ? 256 : kind === 'lurk' || kind === 'idle' ? 256 : kind === 'chat' ? 512 : 2048,
+    temperature: moderation ? 0.1 : kind === 'tech' ? 0.35 : 0.75,
+    timeoutMs: shortReply ? Math.min(providerTimeoutMs, 6000) : providerTimeoutMs,
+  };
+}
+
 export class ProviderPool {
   constructor(private readonly store: Store, private readonly masterKey: string) {}
 
@@ -51,25 +61,19 @@ export class ProviderPool {
     const candidates = this.providers(task);
     if (candidates.length === 0) throw new Error(`没有可用的${task === 'vision' ? '视觉' : '文本'}模型网关`);
     const errors: string[] = [];
-    const moderation = context.kind.includes('moderation');
-    const shortReply = context.kind === 'chat' || context.kind === 'lurk' || context.kind === 'idle';
-    const maxTokens = moderation ? 256 : shortReply ? 768 : 2048;
-    const temperature = moderation ? 0.1 : context.kind === 'tech' ? 0.35 : 0.75;
     for (const provider of candidates) {
       const started = Date.now();
       try {
+        const policy = chatRequestPolicy(context.kind, provider.timeout_ms);
         const controller = new AbortController();
-        const requestTimeout = shortReply
-          ? Math.min(provider.timeout_ms, 12000)
-          : provider.timeout_ms;
-        const timer = setTimeout(() => controller.abort(), requestTimeout);
+        const timer = setTimeout(() => controller.abort(), policy.timeoutMs);
         const response = await fetch(endpoint(provider.base_url, '/v1/chat/completions'), {
           method: 'POST',
           headers: {
             'content-type': 'application/json',
             authorization: `Bearer ${decryptSecret(provider.api_key_enc, this.masterKey)}`,
           },
-          body: JSON.stringify({ model: provider.model, messages, max_tokens: maxTokens, temperature }),
+          body: JSON.stringify({ model: provider.model, messages, max_tokens: policy.maxTokens, temperature: policy.temperature }),
           signal: controller.signal,
         }).finally(() => clearTimeout(timer));
         if (!response.ok) {
