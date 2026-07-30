@@ -22,14 +22,20 @@ type Commands = {
   reset: string;
 };
 type HistoryMessage = { role: "user" | "assistant"; content: string };
+type ActivityMessage = {
+  name: string;
+  text: string;
+  images: string[];
+  at: number;
+};
 type GroupActivity = {
   botId: string;
   groupId: string;
   createdAt: number;
   lastAt: number;
   lastSpoke: number;
-  messages: Array<{ name: string; text: string; at: number }>;
-  contextMessages: Array<{ name: string; text: string; at: number }>;
+  messages: ActivityMessage[];
+  contextMessages: ActivityMessage[];
 };
 
 const commandFallback: Commands = {
@@ -177,15 +183,28 @@ export class EventPipeline {
         .get(activity.botId) as any;
       if (!bot) continue;
 
-      const recent = activity.messages.slice(-6);
+      const recent = activity.contextMessages.slice(-6);
       activity.messages = [];
       activity.createdAt = now;
       activity.lastSpoke = now;
       try {
         this.store.assertQuotaAvailable(activity.botId, activity.groupId);
+        const hasImages = recent.some((item) => item.images.length > 0);
+        const useVision = hasImages && license.features.vision;
         const transcript = recent
-          .map((item) => `${item.name}: ${item.text.slice(0, 240)}`)
+          .map((item) => `${item.name}: ${item.text.slice(0, 240) || "[图片]"}`)
           .join("\n");
+        const content: unknown = useVision
+          ? [
+              { type: "text", text: `近期群聊：\n${transcript}` },
+              ...recent.flatMap((item) =>
+                item.images.map((url) => ({
+                  type: "image_url",
+                  image_url: { url },
+                })),
+              ),
+            ]
+          : `近期群聊：\n${transcript}`;
         const result = await this.pool.chat(
           [
             {
@@ -196,9 +215,9 @@ export class EventPipeline {
                 defaults.lurkPrompt,
               ),
             },
-            { role: "user", content: `近期群聊：\n${transcript}` },
+            { role: "user", content },
           ],
-          "text",
+          useVision ? "vision" : "text",
           { botId: activity.botId, groupId: activity.groupId, kind: "lurk" },
         );
         this.store.consumeQuota(activity.botId, activity.groupId);
@@ -211,6 +230,13 @@ export class EventPipeline {
         this.hub.sendAction(
           activity.botId,
           groupAction(activity.groupId, clean),
+        );
+        this.recordBotContext(
+          activity.botId,
+          activity.groupId,
+          String(bot.persona || defaults.persona || "机器人"),
+          clean,
+          now,
         );
         this.cooldowns.set(`${activity.botId}:${activity.groupId}`, now);
       } catch (error) {
@@ -554,12 +580,13 @@ export class EventPipeline {
       return;
     }
 
-    if (text && !text.startsWith(commands.prefix)) {
+    if ((text || images.length) && !text.startsWith(commands.prefix)) {
       this.recordActivity(
         botId,
         groupId,
         event.sender?.card || event.sender?.nickname || userId,
         text,
+        images,
       );
     }
 
@@ -750,6 +777,7 @@ export class EventPipeline {
     groupId: string,
     name: string,
     text: string,
+    images: string[] = [],
   ) {
     const key = `${botId}:${groupId}`;
     const now = Date.now();
@@ -763,11 +791,35 @@ export class EventPipeline {
       contextMessages: [],
     };
     activity.lastAt = now;
-    activity.messages.push({ name, text: text.slice(0, 500), at: now });
+    const message = {
+      name,
+      text: text.slice(0, 500),
+      images: images.slice(0, 4),
+      at: now,
+    };
+    activity.messages.push(message);
     activity.messages = activity.messages.slice(-20);
-    activity.contextMessages.push({ name, text: text.slice(0, 500), at: now });
+    activity.contextMessages.push(message);
     activity.contextMessages = activity.contextMessages.slice(-20);
     this.activities.set(key, activity);
+  }
+
+  private recordBotContext(
+    botId: string,
+    groupId: string,
+    name: string,
+    text: string,
+    at: number,
+  ) {
+    const activity = this.activities.get(`${botId}:${groupId}`);
+    if (!activity) return;
+    activity.contextMessages.push({
+      name,
+      text: text.slice(0, 500),
+      images: [],
+      at,
+    });
+    activity.contextMessages = activity.contextMessages.slice(-20);
   }
 
   private cleanOutbound(text: string, botId: string, groupId: string) {

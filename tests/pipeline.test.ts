@@ -115,6 +115,75 @@ test("authorized group activity triggers a quota-bound proactive reply", async (
   }
 });
 
+test("contextual replies preserve group images for vision and follow-up questions", async () => {
+  const fixture = await testStore();
+  try {
+    seedBot(fixture.store, { moderation: false, lurk: true, vision: true });
+    authorizeGroup(fixture.store);
+    fixture.store.setSetting(
+      "bot_defaults",
+      engagementSettings({ lurkMinMessages: 1, lurkIntervalSeconds: 5 }),
+    );
+    const calls: any[] = [];
+    const actions: any[] = [];
+    const pool = {
+      chat: async (...args: unknown[]) => {
+        calls.push(args);
+        return { text: "看到了图片", providerId: "vision" };
+      },
+    } as any;
+    const pipeline = new EventPipeline(
+      fixture.store,
+      { sendAction: (_botId: string, action: unknown) => actions.push(action) } as any,
+      pool,
+      new Moderator(fixture.store, pool),
+    );
+    const started = Date.now();
+    await pipeline.enqueue("bot_1", "vision_lurk_1", {
+      post_type: "message",
+      message_type: "group",
+      group_id: "group_1",
+      user_id: "10001",
+      message_id: 101,
+      message: [
+        { type: "image", data: { url: "https://example.test/token-usage.png" } },
+        { type: "text", data: { text: "这个 token 消耗合理吗" } },
+      ],
+      sender: { nickname: "主人", role: "owner" },
+    });
+    await pipeline.tick(started + 4_000);
+
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0][1], "vision");
+    assert.deepEqual(calls[0][0][1].content.at(-1), {
+      type: "image_url",
+      image_url: { url: "https://example.test/token-usage.png" },
+    });
+
+    await pipeline.enqueue("bot_1", "vision_lurk_2", {
+      post_type: "message",
+      message_type: "group",
+      group_id: "group_1",
+      user_id: "10001",
+      message_id: 102,
+      message: "你看得见这个图片内容吗",
+      sender: { nickname: "主人", role: "owner" },
+    });
+    await pipeline.tick(started + 10_001);
+
+    assert.equal(calls.length, 2);
+    assert.equal(calls[1][1], "vision");
+    assert.ok(
+      calls[1][0][1].content.some(
+        (part: any) => part.type === "image_url" && part.image_url.url.includes("token-usage.png"),
+      ),
+    );
+    assert.equal(actions.length, 2);
+  } finally {
+    fixture.close();
+  }
+});
+
 test("outbound filter masks configured secrets", async () => {
   const fixture = await testStore();
   try {
