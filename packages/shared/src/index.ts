@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const PUFF_VERSION = '2.1.0';
+export const PUFF_VERSION = '2.2.0';
 
 export const featureNames = [
   'chat',
@@ -70,7 +70,16 @@ export type AgentHello = {
   nodeId: string;
   version: string;
   hostname: string;
+  autoUpdate?: boolean;
+  updateStatus?: AgentUpdateStatus;
   bots: Array<{ id: string; qq: string; online: boolean }>;
+};
+
+export type AgentUpdateStatus = {
+  state: 'current' | 'failed';
+  targetVersion: string;
+  at: string;
+  error?: string;
 };
 
 export type AgentEvent = {
@@ -84,6 +93,9 @@ export type AgentEvent = {
 export type AgentHeartbeat = {
   type: 'heartbeat';
   nodeId: string;
+  version?: string;
+  autoUpdate?: boolean;
+  updateStatus?: AgentUpdateStatus;
   at: number;
   memoryMb: number;
   queueDepth: number;

@@ -10,6 +10,7 @@ $DataRoot = Join-Path $RepoRoot "data"
 $Archive = Join-Path $DataRoot "agent-update.tar.gz"
 $Staging = Join-Path $DataRoot "agent-update-staging"
 $Backup = Join-Path $DataRoot "agent-update-backup"
+$StatusPath = Join-Path $DataRoot "agent-update-status.json"
 
 foreach ($Path in @($PendingPath, $ConfigPath)) {
   $FullPath = [System.IO.Path]::GetFullPath($Path)
@@ -21,6 +22,26 @@ foreach ($Path in @($PendingPath, $ConfigPath)) {
 $Manifest = Get-Content -LiteralPath $PendingPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $Config = Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
 if (-not $Manifest.url -or -not $Manifest.sha256) { throw "Invalid update manifest." }
+
+function Write-UpdateStatus {
+  param(
+    [Parameter(Mandatory = $true)][ValidateSet("current", "failed")][string]$State,
+    [string]$ErrorMessage = ""
+  )
+  $Payload = @{
+    state = $State
+    targetVersion = [string]$Manifest.version
+    at = [DateTime]::UtcNow.ToString("o")
+  }
+  if ($ErrorMessage) { $Payload.error = $ErrorMessage.Substring(0, [Math]::Min(500, $ErrorMessage.Length)) }
+  $Json = $Payload | ConvertTo-Json -Compress
+  [IO.File]::WriteAllText($StatusPath, $Json, [Text.UTF8Encoding]::new($false))
+}
+
+trap {
+  Write-UpdateStatus -State "failed" -ErrorMessage ($_ | Out-String).Trim()
+  throw $_
+}
 
 New-Item -ItemType Directory -Path $DataRoot -Force | Out-Null
 Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
@@ -85,6 +106,7 @@ try {
   }
   Set-Content -LiteralPath (Join-Path $DataRoot "agent-version.txt") `
     -Value ([string]$Manifest.version) -Encoding UTF8
+  Write-UpdateStatus -State "current"
   Remove-Item -LiteralPath $PendingPath -Force
   Write-Host "Agent updated to $($Manifest.version)."
 } catch {

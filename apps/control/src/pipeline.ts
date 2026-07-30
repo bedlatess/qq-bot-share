@@ -12,6 +12,7 @@ import {
   botDefaultsFallback,
   type BotDefaults,
 } from "./bot-defaults.js";
+import { compilePersona, normalizeGroupMode } from "./persona-engine.js";
 
 type Commands = {
   prefix: string;
@@ -174,14 +175,31 @@ export class EventPipeline {
   }
 
   private async tickRecentActivity(now: number, defaults: BotDefaults) {
-    if (!defaults.lurkEnabled) return;
     for (const activity of this.activities.values()) {
-      if (activity.messages.length < Math.max(1, defaults.lurkMinMessages || 1))
+      const resolved = this.groupDefaults(
+        defaults,
+        activity.botId,
+        activity.groupId,
+      );
+      const groupDefaults = resolved.defaults;
+      if (!groupDefaults.lurkEnabled) continue;
+      const mode = normalizeGroupMode(resolved.policy?.mode);
+      const modeOffset = mode === "quiet" ? 2 : mode === "active" ? -1 : 0;
+      if (
+        activity.messages.length <
+        Math.max(1, (groupDefaults.lurkMinMessages || 1) + modeOffset)
+      )
         continue;
       const quietFor = now - activity.lastAt;
-      const quietThreshold = Math.max(1, defaults.lurkQuietSeconds || 3) * 1000;
+      const quietScale = mode === "quiet" ? 1.5 : mode === "active" ? 0.7 : 1;
+      const quietThreshold =
+        Math.max(1, groupDefaults.lurkQuietSeconds || 3) * 1000 * quietScale;
       if (quietFor < quietThreshold || quietFor > 5 * 60 * 1000) continue;
-      const interval = Math.max(5, defaults.lurkIntervalSeconds || 10) * 1000;
+      const intervalScale = mode === "quiet" ? 2 : mode === "active" ? 0.7 : 1;
+      const interval =
+        Math.max(5, groupDefaults.lurkIntervalSeconds || 10) *
+        1000 *
+        intervalScale;
       if (activity.lastSpoke > 0 && now - activity.lastSpoke < interval)
         continue;
       const license = this.store.getLicense(activity.botId, activity.groupId);
@@ -224,8 +242,10 @@ export class EventPipeline {
               role: "system",
               content: this.personaPrompt(
                 bot,
-                defaults,
-                defaults.lurkPrompt,
+                groupDefaults,
+                groupDefaults.lurkPrompt,
+                activity.botId,
+                activity.groupId,
               ),
             },
             { role: "user", content },
@@ -296,11 +316,21 @@ export class EventPipeline {
   }
 
   private async tickIdleGroups(now: number, defaults: BotDefaults) {
-    if (!defaults.idleEnabled || !this.isActiveHour(now, defaults)) return;
-    const interval = defaults.idleAfterMinutes * 60 * 1000;
     for (const engagement of this.store.listGroupEngagements()) {
-      if (engagement.dormant || engagement.idle_attempts >= defaults.idleMaxAttempts)
+      const resolved = this.groupDefaults(
+        defaults,
+        engagement.bot_id,
+        engagement.group_id,
+      );
+      const groupDefaults = resolved.defaults;
+      if (
+        !groupDefaults.idleEnabled ||
+        !this.isActiveHour(now, groupDefaults) ||
+        engagement.dormant ||
+        engagement.idle_attempts >= groupDefaults.idleMaxAttempts
+      )
         continue;
+      const interval = groupDefaults.idleAfterMinutes * 60 * 1000;
       const license = this.store.getLicense(
         engagement.bot_id,
         engagement.group_id,
@@ -320,7 +350,7 @@ export class EventPipeline {
         .join("\n");
       const attempt = engagement.idle_attempts + 1;
       const userPrompt = [
-        `群聊已连续${defaults.idleAfterMinutes}分钟没有真人消息。这是第${attempt}次主动活跃，请直接生成一条可发送到群里的自然消息。`,
+        `群聊已连续${groupDefaults.idleAfterMinutes}分钟没有真人消息。这是第${attempt}次主动活跃，请直接生成一条可发送到群里的自然消息。`,
         transcript ? `近期群聊：\n${transcript}` : "当前没有可用的近期聊天内容。",
         engagement.last_idle_text
           ? `上一次主动消息：${engagement.last_idle_text}\n本次必须换一个话题。`
@@ -340,8 +370,10 @@ export class EventPipeline {
               role: "system",
               content: this.personaPrompt(
                 engagement,
-                defaults,
-                defaults.idlePrompt,
+                groupDefaults,
+                groupDefaults.idlePrompt,
+                engagement.bot_id,
+                engagement.group_id,
               ),
             },
             { role: "user", content: userPrompt },
@@ -378,7 +410,7 @@ export class EventPipeline {
           engagement.group_id,
           engagement.last_human_at,
           clean,
-          defaults.idleMaxAttempts,
+          groupDefaults.idleMaxAttempts,
           new Date(now),
         );
         this.markSpoke(engagement.bot_id, engagement.group_id, now);
@@ -634,9 +666,16 @@ export class EventPipeline {
       }
     }
 
+    const globalDefaults = this.defaults();
+    const resolvedGroup = this.groupDefaults(globalDefaults, botId, groupId);
+    const effectiveDefaults = resolvedGroup.defaults;
+    const groupMode = normalizeGroupMode(resolvedGroup.policy?.mode);
+
+    if (this.handleMemoryCommand(botId, groupId, userId, text, finish)) return;
+
     const customCommand = this.store.matchCustomCommand(botId, groupId, text);
     if (customCommand) {
-      if (this.inCooldown(`${botId}:${groupId}`)) {
+      if (this.inCooldown(`${botId}:${groupId}`, effectiveDefaults.cooldownMs)) {
         finish("ignored", "自定义命令处于回复冷却");
         return;
       }
@@ -655,8 +694,7 @@ export class EventPipeline {
       return;
     }
 
-    const canLurk =
-      license.features.lurk && Boolean(this.defaults().lurkEnabled);
+    const canLurk = license.features.lurk && Boolean(effectiveDefaults.lurkEnabled);
     if ((text || images.length) && !text.startsWith(commands.prefix)) {
       this.recordActivity(
         botId,
@@ -677,8 +715,12 @@ export class EventPipeline {
 
     const mentioned = ats.includes(String(bot.qq));
     const technical = this.isTechnical(text);
-    if (!mentioned && !(technical && license.features.tech)) return;
-    if (this.inCooldown(`${botId}:${groupId}`)) {
+    const contextualQuestion = this.looksLikeQuestion(text);
+    const directContextReply =
+      !mentioned &&
+      this.shouldReplyDirectly(text, groupMode, technical, contextualQuestion, ats.length > 0);
+    if (!mentioned && !directContextReply) return;
+    if (this.inCooldown(`${botId}:${groupId}`, effectiveDefaults.cooldownMs)) {
       finish(
         canLurk ? "queued" : "ignored",
         canLurk
@@ -687,6 +729,9 @@ export class EventPipeline {
       );
       return;
     }
+    // A direct response owns this event. Remove it before any model/image await so
+    // the lurk timer cannot answer the same message concurrently.
+    this.dropPendingActivity(botId, groupId, eventId);
     const feature: FeatureName = images.length
       ? "vision"
       : technical
@@ -764,11 +809,20 @@ export class EventPipeline {
 
     try {
       this.store.assertQuotaAvailable(botId, groupId);
-      const defaults = this.defaults();
+      const defaults = effectiveDefaults;
+      const memories = this.store.listUserMemories({
+        botId,
+        groupId,
+        userId,
+        limit: 12,
+      });
       const systemPrompt = this.personaPrompt(
         bot,
         defaults,
         technical ? defaults.techPrompt : undefined,
+        botId,
+        groupId,
+        memories,
       );
       const history = this.store.loadConversation(
         botId,
@@ -822,13 +876,21 @@ export class EventPipeline {
         String(bot.persona || defaults.persona || "机器人"),
         clean,
       );
-      finish("replied", mentioned ? "被艾特" : "技术问题自动响应", {
-        mode: technical ? "tech" : images.length ? "vision" : "chat",
-        providerId: result.providerId,
-        latencyMs: Number((result as any).latencyMs || 0),
-        inputTokens: Number((result as any).usage?.prompt_tokens || 0),
-        outputTokens: Number((result as any).usage?.completion_tokens || 0),
-      });
+      finish(
+        "replied",
+        mentioned
+          ? "被艾特"
+          : technical
+            ? "技术问题自动响应"
+            : "上下文问题直接响应",
+        {
+          mode: technical ? "tech" : images.length ? "vision" : "chat",
+          providerId: result.providerId,
+          latencyMs: Number((result as any).latencyMs || 0),
+          inputTokens: Number((result as any).usage?.prompt_tokens || 0),
+          outputTokens: Number((result as any).usage?.completion_tokens || 0),
+        },
+      );
     } catch (error) {
       this.hub.sendAction(
         botId,
@@ -861,6 +923,81 @@ export class EventPipeline {
       action: "send_private_msg",
       params: { user_id: Number(userId), message: reply },
     });
+  }
+
+  private handleMemoryCommand(
+    botId: string,
+    groupId: string,
+    userId: string,
+    text: string,
+    finish: (
+      decision: string,
+      reason?: string,
+      detail?: Record<string, unknown>,
+    ) => void,
+  ) {
+    const remember = text.match(/^记住(?:[：:]\s*|\s+)(.{1,1000})$/s);
+    const forget = text.match(/^忘(?:掉|记)(?:[：:]\s*|\s+)(.*)$/s);
+    const listMemory = /^你记得我什么[？?\s]*$/.test(text);
+    if (remember) {
+      const content = String(remember[1] || "").trim();
+      if (!content) return false;
+      this.store.addUserMemory({
+        botId,
+        groupId,
+        userId,
+        content,
+        source: "chat",
+      });
+      this.hub.sendAction(
+        botId,
+        replyAction(groupId, userId, `记住了：${content}`),
+      );
+      this.store.audit(`qq:${userId}`, "memory.add", `${botId}:${groupId}`, {
+        content: content.slice(0, 120),
+      });
+      finish("memory", "已写入长期记忆", { action: "add" });
+      return true;
+    }
+    if (forget) {
+      const query = String(forget[1] || "").trim();
+      const deleted = this.store.forgetUserMemories({
+        botId,
+        groupId,
+        userId,
+        query: query || undefined,
+      });
+      const reply = deleted
+        ? query
+          ? `已经忘掉与“${query}”相关的 ${deleted} 条记忆。`
+          : `已经清空你的 ${deleted} 条长期记忆。`
+        : "没找到对应的长期记忆。";
+      this.hub.sendAction(botId, replyAction(groupId, userId, reply));
+      this.store.audit(`qq:${userId}`, "memory.forget", `${botId}:${groupId}`, {
+        query,
+        deleted,
+      });
+      finish("memory", "已处理遗忘请求", { action: "forget", deleted });
+      return true;
+    }
+    if (listMemory) {
+      const memories = this.store.listUserMemories({
+        botId,
+        groupId,
+        userId,
+        limit: 12,
+      });
+      const reply = memories.length
+        ? `我记得这些：\n${memories.map((item, index) => `${index + 1}. ${item.content}`).join("\n")}`
+        : "目前还没有你的长期记忆。你可以说“记住：……”。";
+      this.hub.sendAction(botId, replyAction(groupId, userId, reply));
+      finish("memory", "已查看长期记忆", {
+        action: "list",
+        count: memories.length,
+      });
+      return true;
+    }
+    return false;
   }
 
   private async checkNickname(
@@ -1034,20 +1171,64 @@ export class EventPipeline {
     bot: { persona?: unknown; system_prompt?: unknown },
     defaults: BotDefaults,
     modePrompt?: string,
+    botId?: string,
+    groupId?: string,
+    memories: Array<{ content?: unknown }> = [],
   ) {
-    const persona = String(bot.persona || defaults.persona || "泡芙").trim();
-    const base = String(
-      bot.system_prompt ||
-        defaults.systemPrompt ||
-        botDefaultsFallback.systemPrompt,
-    ).trim();
-    return [
-      `你叫“${persona}”。这是内部身份约束，不要向群友复述这句话或介绍人格设定；除非被问到名字，否则不必反复自称。`,
-      base,
-      modePrompt?.trim(),
-    ]
-      .filter(Boolean)
-      .join("\n\n");
+    const policy =
+      botId && groupId ? this.store.getGroupPolicy(botId, groupId) : null;
+    return compilePersona({
+      bot,
+      defaults,
+      groupMode: policy?.mode,
+      groupPersona: policy?.persona_override,
+      modePrompt,
+      memories,
+    }).prompt;
+  }
+
+  private groupDefaults(defaults: BotDefaults, botId: string, groupId: string) {
+    const policy = this.store.getGroupPolicy(botId, groupId);
+    return {
+      policy,
+      defaults: {
+        ...defaults,
+        ...(policy?.settings || {}),
+      } as BotDefaults,
+    };
+  }
+
+  private looksLikeQuestion(text: string) {
+    const value = text.trim();
+    if (!value) return false;
+    return (
+      /[?？]$/.test(value) ||
+      /^(怎么|为什么|为何|啥|什么|谁|哪|能不能|可不可以|有没有|是不是|请问|求助)/.test(
+        value,
+      ) ||
+      /(吗|么|呢)[?？]?$/.test(value)
+    );
+  }
+
+  private shouldReplyDirectly(
+    text: string,
+    mode: "quiet" | "balanced" | "active",
+    technical = this.isTechnical(text),
+    question = this.looksLikeQuestion(text),
+    addressesOtherUser = false,
+  ) {
+    const value = text.trim();
+    if (!value) return false;
+    let score = 0;
+    if (question) score += 3;
+    if (technical) score += 3;
+    if (/[?？]/.test(value)) score += 1;
+    if (/(怎么|为什么|报错|失败|求助|帮忙|谁知道|有没有人|如何|请问)/.test(value)) score += 2;
+    if (/^(嗯+|哦+|好+|行+|知道了|收到|哈哈+|谢谢|没事|可以)[。！!~～]*$/i.test(value)) score -= 4;
+    if (!question && !technical && /[。！!]$/.test(value)) score -= 1;
+    if (addressesOtherUser) score -= 3;
+    const threshold = mode === "active" ? 3 : mode === "quiet" ? 6 : 4;
+    return score >= threshold;
   }
 
   private isActiveHour(now: number, defaults: BotDefaults) {
@@ -1106,11 +1287,10 @@ export class EventPipeline {
       : String(license.expires_at).slice(0, 10);
   }
 
-  private inCooldown(key: string) {
-    const defaults = this.defaults();
+  private inCooldown(key: string, cooldownMs = this.defaults().cooldownMs) {
     return (
       Date.now() - (this.cooldowns.get(key) || 0) <
-      (defaults.cooldownMs || 10000)
+      Math.max(0, Number(cooldownMs) || 0)
     );
   }
 

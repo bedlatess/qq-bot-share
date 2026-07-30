@@ -24,9 +24,12 @@ import {
   Package,
   Plus,
   RefreshCw,
+  RotateCcw,
   Save,
   Settings,
   ShieldCheck,
+  SlidersHorizontal,
+  Sparkles,
   TerminalSquare,
   Trash2,
   Users,
@@ -60,6 +63,7 @@ const navItems = [
   ["dashboard", "总览", LayoutDashboard],
   ["bots", "节点与机器人", Bot],
   ["licenses", "群授权", ShieldCheck],
+  ["groups", "群行为", SlidersHorizontal],
   ["cards", "卡密", KeyRound],
   ["providers", "模型网关", Network],
   ["diagnostics", "消息诊断", TerminalSquare],
@@ -185,6 +189,7 @@ function App() {
           {page === "dashboard" && <Dashboard notify={notify} />}
           {page === "bots" && <BotsPage notify={notify} />}
           {page === "licenses" && <LicensesPage notify={notify} />}
+          {page === "groups" && <GroupBehaviorPage notify={notify} />}
           {page === "cards" && <CardsPage notify={notify} />}
           {page === "providers" && <ProvidersPage notify={notify} />}
           {page === "diagnostics" && <DiagnosticsPage notify={notify} />}
@@ -546,7 +551,20 @@ function BotsPage({ notify }: PageProps) {
                   <Status value={node.status} />
                 </td>
                 <td>{node.hostname || "待连接"}</td>
-                <td>{node.version || "-"}</td>
+                <td>
+                  {node.version || "-"}
+                  <small title={node.last_update_error || ""}>
+                    {node.update_state === "current"
+                      ? "已是最新"
+                      : node.update_state === "disabled"
+                        ? "自动更新已关闭"
+                        : node.update_state === "failed"
+                          ? `更新失败：${node.last_update_error || "请查看 Agent 日志"}`
+                      : node.target_version
+                        ? `待更新至 ${node.target_version}`
+                        : "等待版本信息"}
+                  </small>
+                </td>
                 <td>{node.bot_count}</td>
                 <td>{dateText(node.last_seen_at)}</td>
                 <td>
@@ -1473,6 +1491,444 @@ function ProvidersPage({ notify }: PageProps) {
   );
 }
 
+const tuningFields = [
+  ["humorLevel", "幽默感"],
+  ["initiativeLevel", "主动性"],
+  ["directnessLevel", "直接程度"],
+  ["technicalDepth", "技术深度"],
+  ["answerLength", "回答长度"],
+] as const;
+
+function RangeField({
+  field,
+  label,
+  value,
+  onChange,
+}: {
+  field: string;
+  label: string;
+  value: number;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <label className="range-field" htmlFor={field}>
+      <span>{label}</span>
+      <input
+        id={field}
+        type="range"
+        min="1"
+        max="5"
+        step="1"
+        value={value || 3}
+        onChange={(event) => onChange(Number(event.target.value))}
+      />
+      <output>{value || 3}</output>
+    </label>
+  );
+}
+
+function GroupBehaviorPage({ notify }: PageProps) {
+  const bots = useData<any[]>("/bots", []);
+  const settings = useData<any>("/settings", null);
+  const [botId, setBotId] = useState("");
+  const path = botId
+    ? `/group-policies?botId=${encodeURIComponent(botId)}`
+    : "/group-policies";
+  const policies = useData<any[]>(path, []);
+  const [editing, setEditing] = useState<any>(null);
+
+  const open = (item: any) => {
+    const defaults = settings.data?.bot_defaults || {};
+    const overrides = { ...(item.settings || {}) };
+    setEditing({
+      ...item,
+      mode: item.mode || "balanced",
+      personaOverride: item.persona_override || "",
+      settings: { ...defaults, ...overrides },
+      overrides,
+    });
+  };
+
+  const updateOverride = (key: string, value: unknown) =>
+    setEditing((current: any) => ({
+      ...current,
+      settings: { ...current.settings, [key]: value },
+      overrides: { ...current.overrides, [key]: value },
+    }));
+
+  return (
+    <>
+      <div className="action-row">
+        <p className="page-note">
+          每个群独立控制说话密度、人格偏好和冷场节奏。未设置的群使用全局默认值。
+        </p>
+        <select value={botId} onChange={(event) => setBotId(event.target.value)}>
+          <option value="">全部机器人</option>
+          {bots.data.map((bot) => (
+            <option key={bot.id} value={bot.id}>
+              {bot.name} ({bot.qq})
+            </option>
+          ))}
+        </select>
+      </div>
+      <SectionHead eyebrow="GROUP BEHAVIOR" title="群行为策略" />
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>机器人 / 群</th>
+              <th>模式</th>
+              <th>成员</th>
+              <th>主动参与</th>
+              <th>冷场活跃</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {policies.data.map((item) => {
+              const inherited = settings.data?.bot_defaults || {};
+              const effective = { ...inherited, ...(item.settings || {}) };
+              return (
+                <tr key={`${item.bot_id}:${item.group_id}`}>
+                  <td>
+                    <strong>{item.group_name || item.group_id}</strong>
+                    <small>{item.bot_name} · {item.group_id}</small>
+                  </td>
+                  <td>
+                    <span className={`mode-chip ${item.mode}`}>
+                      {{ quiet: "安静", balanced: "平衡", active: "活跃" }[
+                        item.mode as "quiet"
+                      ] || "平衡"}
+                    </span>
+                  </td>
+                  <td>{item.member_count || 0}</td>
+                  <td>{effective.lurkEnabled ? `${effective.lurkQuietSeconds}s 后判断` : "关闭"}</td>
+                  <td>{effective.idleEnabled ? `${effective.idleAfterMinutes} 分钟` : "关闭"}</td>
+                  <td>
+                    <button className="icon-button" title="编辑群策略" onClick={() => open(item)}>
+                      <Settings size={16} />
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
+            {!policies.data.length && (
+              <tr><td colSpan={6} className="empty-row">请先在“节点与机器人”同步群列表</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      {editing && (
+        <Modal title={`群策略 · ${editing.group_name || editing.group_id}`} onClose={() => setEditing(null)}>
+          <form
+            onSubmit={async (event) => {
+              event.preventDefault();
+              try {
+                await api("/group-policies", {
+                  method: "PUT",
+                  body: JSON.stringify({
+                    botId: editing.bot_id,
+                    groupId: editing.group_id,
+                    mode: editing.mode,
+                    personaOverride: editing.personaOverride,
+                    settings: editing.overrides,
+                  }),
+                });
+                setEditing(null);
+                await policies.reload();
+                notify("群行为策略已保存");
+              } catch (error) {
+                notify(message(error), "error");
+              }
+            }}
+          >
+            <fieldset className="mode-control">
+              <legend>参与模式</legend>
+              {(["quiet", "balanced", "active"] as const).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  className={editing.mode === mode ? "active" : ""}
+                  onClick={() => setEditing({ ...editing, mode })}
+                >
+                  {{ quiet: "安静", balanced: "平衡", active: "活跃" }[mode]}
+                </button>
+              ))}
+            </fieldset>
+            <label>
+              群专属人格补充
+              <textarea
+                rows={4}
+                value={editing.personaOverride}
+                placeholder="留空则完全继承全局人格"
+                onChange={(event) => setEditing({ ...editing, personaOverride: event.target.value })}
+              />
+            </label>
+            <div className="range-stack">
+              {tuningFields.map(([key, label]) => (
+                <RangeField
+                  key={key}
+                  field={`group-${key}`}
+                  label={label}
+                  value={editing.settings[key]}
+                  onChange={(value) => updateOverride(key, value)}
+                />
+              ))}
+            </div>
+            <div className="check-grid">
+              {([[
+                "lurkEnabled", "启用上下文主动参与"
+              ], ["idleEnabled", "启用冷场自动活跃"]] as const).map(([key, label]) => (
+                <label className="check" key={key}>
+                  <input
+                    type="checkbox"
+                    checked={Boolean(editing.settings[key])}
+                    onChange={(event) => updateOverride(key, event.target.checked)}
+                  />
+                  {label}
+                </label>
+              ))}
+            </div>
+            <div className="form-grid compact-grid">
+              {([[
+                "cooldownMs", "回复冷却毫秒"
+              ], ["lurkMinMessages", "最少消息数"
+              ], ["lurkQuietSeconds", "停顿秒数"], ["lurkIntervalSeconds", "主动参与间隔秒"],
+                ["idleAfterMinutes", "冷场分钟"], ["idleMaxAttempts", "最多活跃次数"],
+                ["activeStartHour", "开始小时"], ["activeEndHour", "结束小时"]] as const).map(([key, label]) => (
+                <label key={key}>{label}
+                  <input
+                    type="number"
+                    value={editing.settings[key] ?? ""}
+                    onChange={(event) => updateOverride(key, Number(event.target.value))}
+                  />
+                </label>
+              ))}
+            </div>
+            <div className="form-actions">
+              <button
+                type="button"
+                className="secondary"
+                onClick={async () => {
+                  if (!confirm("恢复这个群的全局默认设置？")) return;
+                  await api(`/group-policies/${editing.bot_id}/${editing.group_id}`, {
+                    method: "DELETE",
+                  });
+                  setEditing(null);
+                  await policies.reload();
+                  notify("已恢复全局默认");
+                }}
+              >
+                <RotateCcw size={16} />
+                恢复全局默认
+              </button>
+              <Submit text="保存群策略" />
+            </div>
+          </form>
+        </Modal>
+      )}
+    </>
+  );
+}
+
+function PersonaSettingsEditor({ value, onSave }: { value: any; onSave: (value: any) => void }) {
+  const [draft, setDraft] = useState(value);
+  useEffect(() => setDraft(value), [JSON.stringify(value)]);
+  return (
+    <form onSubmit={(event) => { event.preventDefault(); onSave(draft); }}>
+      <SectionHead eyebrow="PERSONA ENGINE" title="全局人格与回复节奏" />
+      <p className="form-description">结构化参数会编译成稳定人格；下面的文本只负责补充业务偏好。</p>
+      <div className="persona-name-row">
+        <label>默认名称
+          <input value={draft.persona || ""} onChange={(event) => setDraft({ ...draft, persona: event.target.value })} />
+        </label>
+        <div className="persona-engine-status"><Sparkles size={18} /><span>分层人格引擎</span><b>ACTIVE</b></div>
+      </div>
+      <div className="range-stack">
+        {tuningFields.map(([key, label]) => (
+          <RangeField key={key} field={`global-${key}`} label={label} value={draft[key]} onChange={(next) => setDraft({ ...draft, [key]: next })} />
+        ))}
+      </div>
+      {([[
+        "systemPrompt", "通用人格补充"
+      ], ["techPrompt", "技术答疑规则"], ["lurkPrompt", "主动插话规则"], ["idlePrompt", "冷场起话题规则"]] as const).map(([key, label]) => (
+        <label key={key}>{label}
+          <textarea rows={4} value={draft[key] || ""} onChange={(event) => setDraft({ ...draft, [key]: event.target.value })} />
+        </label>
+      ))}
+      <div className="check-grid">
+        {([[
+          "lurkEnabled", "启用上下文自动参与"
+        ], ["idleEnabled", "启用冷场自动活跃"]] as const).map(([key, label]) => (
+          <label className="check" key={key}><input type="checkbox" checked={Boolean(draft[key])} onChange={(event) => setDraft({ ...draft, [key]: event.target.checked })} />{label}</label>
+        ))}
+      </div>
+      <div className="form-grid compact-grid">
+        {([[
+          "cooldownMs", "群冷却毫秒"
+        ], ["maxHistory", "会话历史条数"], ["lurkMinMessages", "判断最少消息"],
+          ["lurkQuietSeconds", "停顿秒数"], ["lurkIntervalSeconds", "主动参与间隔秒"],
+          ["idleAfterMinutes", "冷场分钟"], ["idleMaxAttempts", "最多活跃次数"],
+          ["activeStartHour", "开始小时"], ["activeEndHour", "结束小时"]] as const).map(([key, label]) => (
+          <label key={key}>{label}<input type="number" value={draft[key] ?? ""} onChange={(event) => setDraft({ ...draft, [key]: Number(event.target.value) })} /></label>
+        ))}
+      </div>
+      <label>活跃时区<input value={draft.activeTimezone || ""} onChange={(event) => setDraft({ ...draft, activeTimezone: event.target.value })} /></label>
+      <Submit text="保存人格设置" />
+    </form>
+  );
+}
+
+function PersonaLab({ notify }: PageProps) {
+  const bots = useData<any[]>("/bots", []);
+  const groups = useData<any[]>("/groups", []);
+  const versions = useData<any[]>("/persona/versions", []);
+  const [botId, setBotId] = useState("");
+  const [groupId, setGroupId] = useState("");
+  const [userId, setUserId] = useState("");
+  const [testMessage, setTestMessage] = useState("用群友的口吻解释一下，为什么机器人回复会变慢？");
+  const [technical, setTechnical] = useState(true);
+  const [result, setResult] = useState<any>(null);
+  const [busy, setBusy] = useState(false);
+  const filteredGroups = groups.data.filter((group) => !botId || group.bot_id === botId);
+  return (
+    <>
+      <SectionHead eyebrow="PERSONA LAB" title="人格调试室" />
+      <p className="form-description">用真实模型调用预览最终回答，并显示本次注入了哪些人格层。不会展示密钥和提示词正文。</p>
+      <div className="lab-layout">
+        <form className="lab-controls" onSubmit={async (event) => {
+          event.preventDefault();
+          setBusy(true);
+          try {
+            const preview = await api("/persona/preview", { method: "POST", body: JSON.stringify({ botId, groupId, userId, message: testMessage, technical }) });
+            setResult(preview);
+          } catch (error) { notify(message(error), "error"); } finally { setBusy(false); }
+        }}>
+          <div className="form-grid">
+            <label>机器人<select required value={botId} onChange={(event) => { setBotId(event.target.value); setGroupId(""); }}><option value="">选择机器人</option>{bots.data.map((bot) => <option key={bot.id} value={bot.id}>{bot.name} ({bot.qq})</option>)}</select></label>
+            <label>群<select value={groupId} onChange={(event) => setGroupId(event.target.value)}><option value="">不指定群</option>{filteredGroups.map((group) => <option key={`${group.bot_id}:${group.group_id}`} value={group.group_id}>{group.group_name || group.group_id}</option>)}</select></label>
+          </div>
+          <label>测试用户 QQ<input value={userId} inputMode="numeric" placeholder="可选，用于注入长期记忆" onChange={(event) => setUserId(event.target.value)} /></label>
+          <label>测试消息<textarea rows={6} required value={testMessage} onChange={(event) => setTestMessage(event.target.value)} /></label>
+          <label className="check"><input type="checkbox" checked={technical} onChange={(event) => setTechnical(event.target.checked)} />按技术问题调试</label>
+          <button className="primary wide" disabled={busy || !botId}>{busy ? <RefreshCw className="spin" size={16} /> : <Sparkles size={16} />}运行预览</button>
+        </form>
+        <section className="lab-result" aria-live="polite">
+          {result ? <><div className="lab-meta"><span>{result.providerId}</span><b>{result.latencyMs} ms</b></div><div className="reply-preview">{result.reply}</div><div className="layer-list">{result.layers.map((layer: any) => <span key={layer.key}>{layer.label}<b>{layer.characters}</b></span>)}</div></> : <div className="lab-empty">选择机器人并运行一次预览</div>}
+        </section>
+      </div>
+      <div className="version-bar">
+        <div><strong>人格版本</strong><span>保存当前全局人格，改坏了可直接恢复。</span></div>
+        <button className="secondary" onClick={async () => { await api("/persona/versions", { method: "POST", body: JSON.stringify({ note: `控制台快照 ${new Date().toLocaleString()}` }) }); await versions.reload(); notify("人格版本已保存"); }}><Save size={16} />保存快照</button>
+      </div>
+      <div className="version-list">{versions.data.map((item) => <div key={item.id}><span><strong>{item.note || "未命名快照"}</strong><small>{dateText(item.created_at)}</small></span><button className="secondary" onClick={async () => { if (!confirm("恢复这个人格版本？")) return; await api(`/persona/versions/${item.id}/restore`, { method: "POST" }); notify("人格版本已恢复"); }}>恢复</button></div>)}{!versions.data.length && <p className="page-note">还没有人格快照</p>}</div>
+    </>
+  );
+}
+
+function MemoryManager({ notify }: PageProps) {
+  const bots = useData<any[]>("/bots", []);
+  const groups = useData<any[]>("/groups", []);
+  const [botId, setBotId] = useState("");
+  const [groupId, setGroupId] = useState("");
+  const [userId, setUserId] = useState("");
+  const [query, setQuery] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [createBotId, setCreateBotId] = useState("");
+  const [createGroupId, setCreateGroupId] = useState("");
+  const params = new URLSearchParams({ limit: "300" });
+  if (botId) params.set("botId", botId);
+  if (groupId) params.set("groupId", groupId);
+  if (userId.trim()) params.set("userId", userId.trim());
+  if (query.trim()) params.set("query", query.trim());
+  const memories = useData<any[]>(`/memories?${params}`, []);
+  const filteredGroups = groups.data.filter((group) => !botId || group.bot_id === botId);
+  return (
+    <>
+      <div className="action-row memory-toolbar">
+        <div className="memory-filters">
+          <select value={botId} onChange={(event) => { setBotId(event.target.value); setGroupId(""); }}><option value="">全部机器人</option>{bots.data.map((bot) => <option key={bot.id} value={bot.id}>{bot.name}</option>)}</select>
+          <select value={groupId} onChange={(event) => setGroupId(event.target.value)}><option value="">全部群</option>{filteredGroups.map((group) => <option key={`${group.bot_id}:${group.group_id}`} value={group.group_id}>{group.group_name || group.group_id}</option>)}</select>
+          <input value={userId} placeholder="用户 QQ" inputMode="numeric" onChange={(event) => setUserId(event.target.value)} />
+          <input value={query} placeholder="搜索记忆内容" onChange={(event) => setQuery(event.target.value)} />
+        </div>
+        <div className="memory-actions">
+          {botId && groupId && userId.trim() && (
+            <button className="secondary" onClick={async () => {
+              if (!confirm(`清空用户 ${userId.trim()} 在当前群的全部长期记忆？`)) return;
+              const result = await api<{ deleted: number }>("/memories", {
+                method: "DELETE",
+                body: JSON.stringify({ botId, groupId, userId: userId.trim() }),
+              });
+              await memories.reload();
+              notify(`已清空 ${result.deleted} 条长期记忆`);
+            }}><Trash2 size={16} />清空该用户</button>
+          )}
+          <button className="primary" onClick={() => {
+            setCreateBotId(botId);
+            setCreateGroupId(groupId);
+            setCreating(true);
+          }}><Plus size={16} />添加记忆</button>
+        </div>
+      </div>
+      <SectionHead eyebrow="LONG-TERM MEMORY" title="结构化长期记忆" />
+      <div className="table-wrap"><table><thead><tr><th>用户</th><th>机器人 / 群</th><th>记忆内容</th><th>来源 / 时间</th><th>操作</th></tr></thead><tbody>{memories.data.map((item) => <tr key={item.id}><td className="mono">{item.user_id}</td><td>{item.bot_name}<small>{item.group_name || item.group_id}</small></td><td className="memory-content">{item.content}</td><td>{item.source === "admin" ? "后台" : "群聊"}<small>{dateText(item.updated_at)}</small></td><td><button className="icon-button danger" title="删除记忆" onClick={async () => { if (!confirm("删除这条长期记忆？")) return; await api(`/memories/${item.id}`, { method: "DELETE" }); await memories.reload(); notify("记忆已删除"); }}><Trash2 size={16} /></button></td></tr>)}{!memories.data.length && <tr><td colSpan={5} className="empty-row">没有符合条件的长期记忆</td></tr>}</tbody></table></div>
+      {creating && (
+        <Modal title="添加长期记忆" onClose={() => setCreating(false)}>
+          <form onSubmit={async (event) => {
+            event.preventDefault();
+            const fd = new FormData(event.currentTarget);
+            try {
+              await api("/memories", {
+                method: "POST",
+                body: JSON.stringify({
+                  botId: createBotId,
+                  groupId: createGroupId,
+                  userId: fd.get("userId"),
+                  content: fd.get("content"),
+                }),
+              });
+              setCreating(false);
+              await memories.reload();
+              notify("长期记忆已添加");
+            } catch (error) {
+              notify(message(error), "error");
+            }
+          }}>
+            <label>机器人
+              <select
+                name="botId"
+                required
+                value={createBotId}
+                onChange={(event) => {
+                  setCreateBotId(event.target.value);
+                  setCreateGroupId("");
+                }}
+              >
+                <option value="">选择机器人</option>
+                {bots.data.map((bot) => <option key={bot.id} value={bot.id}>{bot.name} ({bot.qq})</option>)}
+              </select>
+            </label>
+            <label>群
+              <select name="groupId" required value={createGroupId} onChange={(event) => setCreateGroupId(event.target.value)}>
+                <option value="">选择群</option>
+                {groups.data.filter((group) => group.bot_id === createBotId).map((group) => (
+                  <option key={`${group.bot_id}:${group.group_id}`} value={group.group_id}>
+                    {group.group_name || group.group_id} · {group.bot_name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>用户 QQ<input name="userId" required pattern="\d{5,15}" defaultValue={userId} /></label>
+            <label>记忆内容<textarea name="content" rows={5} required maxLength={1000} /></label>
+            <Submit text="添加记忆" />
+          </form>
+        </Modal>
+      )}
+    </>
+  );
+}
+
 function DiagnosticsPage({ notify }: PageProps) {
   const bots = useData<any[]>("/bots", []);
   const [botId, setBotId] = useState("");
@@ -1621,6 +2077,7 @@ function TraceBadge({ value }: { value: string }) {
     replied: "已回复",
     command: "内置命令",
     custom_reply: "自定义回复",
+    memory: "长期记忆",
     ignored: "已忽略",
     denied: "权限不足",
     moderated: "审核处理",
@@ -1656,6 +2113,8 @@ function SettingsPage({ notify }: PageProps) {
               ["commands", "内置指令"],
               ["custom", "自定义命令"],
               ["persona", "人格与节奏"],
+              ["persona-lab", "人格调试"],
+              ["memories", "记忆管理"],
               ["moderation", "平衡审核"],
               ["outbound", "出站过滤"],
               ["security", "登录安全"],
@@ -1701,31 +2160,13 @@ function SettingsPage({ notify }: PageProps) {
           )}
           {tab === "custom" && <CustomCommandsEditor notify={notify} />}
           {tab === "persona" && (
-            <ObjectEditor
-              title="全局人格默认值"
+            <PersonaSettingsEditor
               value={settings.data.bot_defaults}
-              fields={[
-                ["persona", "默认名称"],
-                ["systemPrompt", "闲聊提示词", "textarea"],
-                ["techPrompt", "技术答疑提示词", "textarea"],
-                ["lurkPrompt", "主动插话提示词", "textarea"],
-                ["idlePrompt", "冷场起话题提示词", "textarea"],
-                ["idleEnabled", "启用冷场自动活跃", "checkbox"],
-                ["cooldownMs", "群冷却毫秒", "number"],
-                ["maxHistory", "最大历史条数", "number"],
-                ["lurkEnabled", "启用上下文自动参与", "checkbox"],
-                ["lurkMinMessages", "判断所需最少消息数", "number"],
-                ["lurkQuietSeconds", "等待群聊停顿秒数", "number"],
-                ["lurkIntervalSeconds", "两次自动参与最短间隔秒", "number"],
-                ["idleAfterMinutes", "冷场间隔分钟", "number"],
-                ["idleMaxAttempts", "无人回应最多尝试次数", "number"],
-                ["activeStartHour", "每日开始活跃小时", "number"],
-                ["activeEndHour", "每日结束活跃小时", "number"],
-                ["activeTimezone", "活跃时区"],
-              ]}
               onSave={(value) => save("bot_defaults", value)}
             />
           )}
+          {tab === "persona-lab" && <PersonaLab notify={notify} />}
+          {tab === "memories" && <MemoryManager notify={notify} />}
           {tab === "moderation" && (
             <ModerationEditor
               value={settings.data.moderation}

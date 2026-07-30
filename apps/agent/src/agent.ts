@@ -1,8 +1,8 @@
 import { hostname } from 'node:os';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import WebSocket from 'ws';
-import { PUFF_VERSION, type AgentEvent, type ControlMessage } from '@puff/shared';
+import { PUFF_VERSION, type AgentEvent, type AgentUpdateStatus, type ControlMessage } from '@puff/shared';
 import type { AgentConfig } from './config.js';
 import { BotConnection } from './bot-connection.js';
 import { DiskSpool } from './spool.js';
@@ -90,15 +90,36 @@ export class Agent {
   }
 
   private sendHello() {
-    this.send({ type: 'hello', nodeId: this.config.nodeId, version: PUFF_VERSION, hostname: hostname(), bots: [...this.bots.values()].map((bot) => ({ id: bot.config.id, qq: bot.config.qq, online: bot.online })) });
+    this.send({
+      type: 'hello',
+      nodeId: this.config.nodeId,
+      version: PUFF_VERSION,
+      hostname: hostname(),
+      autoUpdate: this.config.autoUpdate,
+      updateStatus: this.readUpdateStatus(),
+      bots: [...this.bots.values()].map((bot) => ({ id: bot.config.id, qq: bot.config.qq, online: bot.online })),
+    });
   }
 
   private sendHeartbeat() {
     this.send({
-      type: 'heartbeat', nodeId: this.config.nodeId, at: Date.now(),
+      type: 'heartbeat', nodeId: this.config.nodeId, version: PUFF_VERSION,
+      autoUpdate: this.config.autoUpdate, updateStatus: this.readUpdateStatus(), at: Date.now(),
       memoryMb: Math.round(process.memoryUsage().rss / 1024 / 1024), queueDepth: this.spool.size(),
       bots: [...this.bots.values()].map((bot) => ({ id: bot.config.id, qq: bot.config.qq, oneBotOnline: bot.online, loginError: bot.lastError })),
     });
+  }
+
+  private readUpdateStatus(): AgentUpdateStatus | undefined {
+    try {
+      const path = resolve(process.cwd(), 'data', 'agent-update-status.json');
+      const value = JSON.parse(readFileSync(path, 'utf8').replace(/^\uFEFF/, '')) as AgentUpdateStatus;
+      if (!['current', 'failed'].includes(value.state) || !value.targetVersion || !value.at)
+        return undefined;
+      return value;
+    } catch {
+      return undefined;
+    }
   }
 
   private async handleControl(raw: string) {

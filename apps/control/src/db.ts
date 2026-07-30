@@ -28,6 +28,16 @@ export type GroupEngagement = {
   system_prompt: string;
 };
 
+export type GroupPolicy = {
+  bot_id: string;
+  group_id: string;
+  mode: "quiet" | "balanced" | "active";
+  persona_override: string;
+  settings_json: string;
+  updated_at: string;
+  settings: Record<string, unknown>;
+};
+
 export class Store {
   readonly db: Db;
 
@@ -283,6 +293,33 @@ export class Store {
       );
       CREATE INDEX IF NOT EXISTS idx_bot_groups_name
         ON bot_groups(group_name,group_id);
+      CREATE TABLE IF NOT EXISTS group_policies (
+        bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+        group_id TEXT NOT NULL,
+        mode TEXT NOT NULL DEFAULT 'balanced' CHECK(mode IN ('quiet','balanced','active')),
+        persona_override TEXT NOT NULL DEFAULT '',
+        settings_json TEXT NOT NULL DEFAULT '{}',
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(bot_id,group_id)
+      );
+      CREATE TABLE IF NOT EXISTS user_memories (
+        id TEXT PRIMARY KEY,
+        bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+        group_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        content TEXT NOT NULL,
+        source TEXT NOT NULL DEFAULT 'chat',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_user_memories_scope
+        ON user_memories(bot_id,group_id,user_id,updated_at DESC);
+      CREATE TABLE IF NOT EXISTS persona_versions (
+        id TEXT PRIMARY KEY,
+        config_json TEXT NOT NULL,
+        note TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS provider_health_events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         provider_id TEXT NOT NULL REFERENCES ai_providers(id) ON DELETE CASCADE,
@@ -302,6 +339,28 @@ export class Store {
       this.db.exec(
         "ALTER TABLE usage_events ADD COLUMN latency_ms INTEGER NOT NULL DEFAULT 0",
       );
+    const nodeColumns = this.db
+      .prepare("PRAGMA table_info(nodes)")
+      .all() as Array<{ name: string }>;
+    const addNodeColumn = (name: string, sql: string) => {
+      if (!nodeColumns.some((column) => column.name === name)) this.db.exec(sql);
+    };
+    addNodeColumn(
+      "update_state",
+      "ALTER TABLE nodes ADD COLUMN update_state TEXT NOT NULL DEFAULT 'unknown'",
+    );
+    addNodeColumn(
+      "target_version",
+      "ALTER TABLE nodes ADD COLUMN target_version TEXT",
+    );
+    addNodeColumn(
+      "last_update_at",
+      "ALTER TABLE nodes ADD COLUMN last_update_at TEXT",
+    );
+    addNodeColumn(
+      "last_update_error",
+      "ALTER TABLE nodes ADD COLUMN last_update_error TEXT",
+    );
     this.db
       .prepare(
         `INSERT OR IGNORE INTO usage_totals
@@ -1055,6 +1114,218 @@ export class Store {
         .prepare("DELETE FROM bot_groups WHERE bot_id=? AND last_seen_at<>?")
         .run(botId, now);
     })();
+  }
+
+  getGroupPolicy(botId: string, groupId: string): GroupPolicy | null {
+    const row = this.db
+      .prepare("SELECT * FROM group_policies WHERE bot_id=? AND group_id=?")
+      .get(botId, groupId) as Omit<GroupPolicy, "settings"> | undefined;
+    if (!row) return null;
+    let settings: Record<string, unknown> = {};
+    try {
+      settings = JSON.parse(row.settings_json) as Record<string, unknown>;
+    } catch {
+      settings = {};
+    }
+    return { ...row, settings };
+  }
+
+  listGroupPolicies(botId?: string) {
+    const rows = this.db
+      .prepare(
+        `SELECT g.bot_id,g.group_id,g.group_name,g.member_count,g.bot_role,
+          b.name bot_name,b.qq,gp.mode,gp.persona_override,gp.settings_json,gp.updated_at
+         FROM bot_groups g JOIN bots b ON b.id=g.bot_id
+         LEFT JOIN group_policies gp ON gp.bot_id=g.bot_id AND gp.group_id=g.group_id
+         ${botId ? "WHERE g.bot_id=?" : ""}
+         ORDER BY b.name,g.group_name,g.group_id`,
+      )
+      .all(...(botId ? [botId] : [])) as any[];
+    return rows.map((row) => {
+      let settings = {};
+      try {
+        settings = JSON.parse(String(row.settings_json || "{}"));
+      } catch {
+        settings = {};
+      }
+      return {
+        ...row,
+        mode: row.mode || "balanced",
+        persona_override: row.persona_override || "",
+        settings,
+      };
+    });
+  }
+
+  setGroupPolicy(input: {
+    botId: string;
+    groupId: string;
+    mode: "quiet" | "balanced" | "active";
+    personaOverride?: string;
+    settings?: Record<string, unknown>;
+  }) {
+    this.db
+      .prepare(
+        `INSERT INTO group_policies
+         (bot_id,group_id,mode,persona_override,settings_json,updated_at)
+         VALUES (?,?,?,?,?,?) ON CONFLICT(bot_id,group_id) DO UPDATE SET
+           mode=excluded.mode,persona_override=excluded.persona_override,
+           settings_json=excluded.settings_json,updated_at=excluded.updated_at`,
+      )
+      .run(
+        input.botId,
+        input.groupId,
+        input.mode,
+        (input.personaOverride || "").slice(0, 6000),
+        JSON.stringify(input.settings || {}),
+        nowIso(),
+      );
+  }
+
+  deleteGroupPolicy(botId: string, groupId: string) {
+    return this.db
+      .prepare("DELETE FROM group_policies WHERE bot_id=? AND group_id=?")
+      .run(botId, groupId).changes;
+  }
+
+  addUserMemory(input: {
+    botId: string;
+    groupId: string;
+    userId: string;
+    content: string;
+    source?: string;
+  }) {
+    const content = input.content.trim().slice(0, 1000);
+    const existing = this.db
+      .prepare(
+        `SELECT id FROM user_memories
+         WHERE bot_id=? AND group_id=? AND user_id=? AND content=?`,
+      )
+      .get(input.botId, input.groupId, input.userId, content) as
+      | { id: string }
+      | undefined;
+    if (existing) {
+      this.db
+        .prepare("UPDATE user_memories SET updated_at=? WHERE id=?")
+        .run(nowIso(), existing.id);
+      return existing.id;
+    }
+    const id = randomId("mem_");
+    const now = nowIso();
+    this.db
+      .prepare(
+        `INSERT INTO user_memories
+         (id,bot_id,group_id,user_id,content,source,created_at,updated_at)
+         VALUES (?,?,?,?,?,?,?,?)`,
+      )
+      .run(
+        id,
+        input.botId,
+        input.groupId,
+        input.userId,
+        content,
+        input.source || "chat",
+        now,
+        now,
+      );
+    return id;
+  }
+
+  listUserMemories(filter: {
+    botId?: string;
+    groupId?: string;
+    userId?: string;
+    query?: string;
+    limit?: number;
+  } = {}) {
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (filter.botId) {
+      where.push("m.bot_id=?");
+      params.push(filter.botId);
+    }
+    if (filter.groupId) {
+      where.push("m.group_id=?");
+      params.push(filter.groupId);
+    }
+    if (filter.userId) {
+      where.push("m.user_id=?");
+      params.push(filter.userId);
+    }
+    if (filter.query) {
+      where.push("m.content LIKE ? ESCAPE '\\'");
+      params.push(`%${filter.query.replace(/[\\%_]/g, "\\$&")}%`);
+    }
+    params.push(Math.max(1, Math.min(500, filter.limit || 100)));
+    return this.db
+      .prepare(
+        `SELECT m.*,b.name bot_name,b.qq,g.group_name
+         FROM user_memories m JOIN bots b ON b.id=m.bot_id
+         LEFT JOIN bot_groups g ON g.bot_id=m.bot_id AND g.group_id=m.group_id
+         ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
+         ORDER BY m.updated_at DESC LIMIT ?`,
+      )
+      .all(...params) as Array<Record<string, unknown>>;
+  }
+
+  forgetUserMemories(input: {
+    botId: string;
+    groupId: string;
+    userId: string;
+    query?: string;
+  }) {
+    if (!input.query?.trim())
+      return this.db
+        .prepare(
+          "DELETE FROM user_memories WHERE bot_id=? AND group_id=? AND user_id=?",
+        )
+        .run(input.botId, input.groupId, input.userId).changes;
+    const escaped = input.query.trim().replace(/[\\%_]/g, "\\$&");
+    return this.db
+      .prepare(
+        `DELETE FROM user_memories WHERE bot_id=? AND group_id=? AND user_id=?
+         AND content LIKE ? ESCAPE '\\'`,
+      )
+      .run(input.botId, input.groupId, input.userId, `%${escaped}%`).changes;
+  }
+
+  deleteUserMemory(id: string) {
+    return this.db.prepare("DELETE FROM user_memories WHERE id=?").run(id).changes;
+  }
+
+  savePersonaVersion(config: unknown, note = "") {
+    const id = randomId("persona_");
+    this.db.transaction(() => {
+      this.db
+        .prepare(
+          "INSERT INTO persona_versions (id,config_json,note,created_at) VALUES (?,?,?,?)",
+        )
+        .run(id, JSON.stringify(config), note.trim().slice(0, 200), nowIso());
+      this.db.prepare(
+        `DELETE FROM persona_versions WHERE id NOT IN (
+           SELECT id FROM persona_versions ORDER BY created_at DESC LIMIT 20
+         )`,
+      ).run();
+    })();
+    return id;
+  }
+
+  listPersonaVersions() {
+    return (this.db
+      .prepare("SELECT id,note,created_at FROM persona_versions ORDER BY created_at DESC")
+      .all() as Array<Record<string, unknown>>);
+  }
+
+  getPersonaVersion(id: string) {
+    const row = this.db
+      .prepare("SELECT config_json FROM persona_versions WHERE id=?")
+      .get(id) as { config_json: string } | undefined;
+    if (!row) return null;
+    try {
+      return JSON.parse(row.config_json) as unknown;
+    } catch {
+      return null;
+    }
   }
 
   recordProviderHealth(

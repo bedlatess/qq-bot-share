@@ -39,8 +39,16 @@ export class AgentHub {
     if (old && old !== socket) old.close(4001, "replaced");
     this.sockets.set(nodeId, socket);
     this.store.db
-      .prepare(`UPDATE nodes SET status='online',last_seen_at=? WHERE id=?`)
-      .run(nowIso(), nodeId);
+      .prepare(
+        `UPDATE nodes SET status='online',last_seen_at=?,target_version=?,
+         update_state=? WHERE id=?`,
+      )
+      .run(
+        nowIso(),
+        this.agentUpdate?.version || null,
+        "unknown",
+        nodeId,
+      );
 
     socket.on("message", (raw) => {
       void this.handle(nodeId, raw.toString());
@@ -74,11 +82,26 @@ export class AgentHub {
       return;
     }
     if (message.type === "hello") {
+      const update = this.updateState(
+        message.version,
+        message.autoUpdate,
+        message.updateStatus,
+      );
       this.store.db
         .prepare(
-          `UPDATE nodes SET hostname=?,version=?,status='online',last_seen_at=? WHERE id=?`,
+          `UPDATE nodes SET hostname=?,version=?,status='online',last_seen_at=?,
+           target_version=?,update_state=?,last_update_at=?,last_update_error=? WHERE id=?`,
         )
-        .run(message.hostname, message.version, nowIso(), nodeId);
+        .run(
+          message.hostname,
+          message.version,
+          nowIso(),
+          this.agentUpdate?.version || null,
+          update.state,
+          update.at,
+          update.error,
+          nodeId,
+        );
       for (const bot of message.bots) {
         this.botNodes.set(bot.id, nodeId);
         this.store.db
@@ -90,9 +113,34 @@ export class AgentHub {
       return;
     }
     if (message.type === "heartbeat") {
+      const currentVersion =
+        message.version ||
+        String(
+          (
+            this.store.db
+              .prepare("SELECT version FROM nodes WHERE id=?")
+              .get(nodeId) as { version?: string } | undefined
+          )?.version || "unknown",
+        );
+      const update = this.updateState(
+        currentVersion,
+        message.autoUpdate,
+        message.updateStatus,
+      );
       this.store.db
-        .prepare(`UPDATE nodes SET status='online',last_seen_at=? WHERE id=?`)
-        .run(nowIso(), nodeId);
+        .prepare(
+          `UPDATE nodes SET status='online',version=?,last_seen_at=?,target_version=?,
+           update_state=?,last_update_at=?,last_update_error=? WHERE id=?`,
+        )
+        .run(
+          currentVersion,
+          nowIso(),
+          this.agentUpdate?.version || null,
+          update.state,
+          update.at,
+          update.error,
+          nodeId,
+        );
       for (const bot of message.bots) {
         this.botNodes.set(bot.id, nodeId);
         this.store.db
@@ -123,6 +171,25 @@ export class AgentHub {
         ? pending.resolve(message.data)
         : pending.reject(new Error(message.error || "NapCat request failed"));
     }
+  }
+
+  private updateState(
+    version: string,
+    autoUpdate: boolean | undefined,
+    report?: { state: "current" | "failed"; targetVersion: string; at: string; error?: string },
+  ) {
+    const target = this.agentUpdate?.version;
+    if (!target) return { state: "unknown", at: null, error: null };
+    if (version === target)
+      return {
+        state: "current",
+        at: report?.targetVersion === target && report.state === "current" ? report.at : nowIso(),
+        error: null,
+      };
+    if (autoUpdate === false) return { state: "disabled", at: null, error: null };
+    if (report?.targetVersion === target && report.state === "failed")
+      return { state: "failed", at: report.at, error: (report.error || "更新失败").slice(0, 500) };
+    return { state: "pending", at: null, error: null };
   }
 
   sendAction(botId: string, action: OneBotAction) {

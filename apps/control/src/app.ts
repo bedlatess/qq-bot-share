@@ -14,6 +14,8 @@ import { ProviderPool } from "./provider-pool.js";
 import { Moderator } from "./moderation.js";
 import { EventPipeline } from "./pipeline.js";
 import { StorageManager } from "./storage.js";
+import { botDefaultsFallback, type BotDefaults } from "./bot-defaults.js";
+import { compilePersona, normalizeGroupMode } from "./persona-engine.js";
 import {
   encryptSecret,
   hashPassword,
@@ -305,6 +307,7 @@ export async function buildApp(config: AppConfig) {
   registerProviderRoutes(app, store, pool, config.masterKey);
   registerCustomCommandRoutes(app, store);
   registerGroupRoutes(app, store, hub);
+  registerPersonaRoutes(app, store, pool);
   registerDiagnosticRoutes(app, store);
   registerSettingsRoutes(app, store);
   registerLogRoutes(app, store, storage);
@@ -1032,6 +1035,229 @@ function registerGroupRoutes(app: any, store: Store, hub: AgentHub) {
   });
 }
 
+const groupPolicySettingsSchema = z
+  .object({
+    humorLevel: z.number().int().min(1).max(5).optional(),
+    initiativeLevel: z.number().int().min(1).max(5).optional(),
+    directnessLevel: z.number().int().min(1).max(5).optional(),
+    technicalDepth: z.number().int().min(1).max(5).optional(),
+    answerLength: z.number().int().min(1).max(5).optional(),
+    cooldownMs: z.number().int().min(0).max(3600000).optional(),
+    lurkEnabled: z.boolean().optional(),
+    lurkMinMessages: z.number().int().min(1).max(20).optional(),
+    lurkQuietSeconds: z.number().int().min(1).max(60).optional(),
+    lurkIntervalSeconds: z.number().int().min(5).max(3600).optional(),
+    idleEnabled: z.boolean().optional(),
+    idleAfterMinutes: z.number().int().min(1).max(1440).optional(),
+    idleMaxAttempts: z.number().int().min(1).max(5).optional(),
+    activeStartHour: z.number().int().min(0).max(23).optional(),
+    activeEndHour: z.number().int().min(1).max(24).optional(),
+  })
+  .strict();
+
+function registerPersonaRoutes(app: any, store: Store, pool: ProviderPool) {
+  app.get("/api/group-policies", async (request: any) => {
+    const query = z.object({ botId: z.string().optional() }).parse(request.query);
+    return { ok: true, data: store.listGroupPolicies(query.botId) };
+  });
+
+  app.put("/api/group-policies", async (request: any) => {
+    const body = z
+      .object({
+        botId: z.string().min(1),
+        groupId: z.string().regex(/^\d{5,15}$/),
+        mode: z.enum(["quiet", "balanced", "active"]),
+        personaOverride: z.string().max(6000).default(""),
+        settings: groupPolicySettingsSchema.default({}),
+      })
+      .parse(request.body);
+    const group = store.db
+      .prepare("SELECT 1 FROM bot_groups WHERE bot_id=? AND group_id=?")
+      .get(body.botId, body.groupId);
+    if (!group)
+      throw Object.assign(new Error("群信息不存在，请先同步群列表"), {
+        statusCode: 404,
+      });
+    store.setGroupPolicy(body);
+    store.audit(
+      `admin:${request.admin.email}`,
+      "group_policy.update",
+      `${body.botId}:${body.groupId}`,
+      { mode: body.mode },
+    );
+    return { ok: true };
+  });
+
+  app.delete("/api/group-policies/:botId/:groupId", async (request: any) => {
+    const params = z
+      .object({
+        botId: z.string().min(1),
+        groupId: z.string().regex(/^\d{5,15}$/),
+      })
+      .parse(request.params);
+    const deleted = store.deleteGroupPolicy(params.botId, params.groupId);
+    store.audit(
+      `admin:${request.admin.email}`,
+      "group_policy.reset",
+      `${params.botId}:${params.groupId}`,
+      { deleted },
+    );
+    return { ok: true, data: { deleted } };
+  });
+
+  app.get("/api/memories", async (request: any) => {
+    const query = z
+      .object({
+        botId: z.string().optional(),
+        groupId: z.string().optional(),
+        userId: z.string().optional(),
+        query: z.string().max(200).optional(),
+        limit: z.coerce.number().int().min(1).max(500).default(200),
+      })
+      .parse(request.query);
+    return { ok: true, data: store.listUserMemories(query) };
+  });
+
+  app.post("/api/memories", async (request: any) => {
+    const body = z
+      .object({
+        botId: z.string().min(1),
+        groupId: z.string().regex(/^\d{5,15}$/),
+        userId: z.string().regex(/^\d{5,15}$/),
+        content: z.string().trim().min(1).max(1000),
+      })
+      .parse(request.body);
+    const group = store.db
+      .prepare("SELECT 1 FROM bot_groups WHERE bot_id=? AND group_id=?")
+      .get(body.botId, body.groupId);
+    if (!group)
+      throw Object.assign(new Error("机器人与群不匹配，请先同步群列表"), {
+        statusCode: 404,
+      });
+    const id = store.addUserMemory({ ...body, source: "admin" });
+    store.audit(`admin:${request.admin.email}`, "memory.add", id);
+    return { ok: true, data: { id } };
+  });
+
+  app.delete("/api/memories/:id", async (request: any) => {
+    const id = z.string().parse(request.params.id);
+    const deleted = store.deleteUserMemory(id);
+    store.audit(`admin:${request.admin.email}`, "memory.delete", id);
+    return { ok: true, data: { deleted } };
+  });
+
+  app.delete("/api/memories", async (request: any) => {
+    const body = z
+      .object({
+        botId: z.string().min(1),
+        groupId: z.string().regex(/^\d{5,15}$/),
+        userId: z.string().regex(/^\d{5,15}$/),
+      })
+      .parse(request.body);
+    const deleted = store.forgetUserMemories(body);
+    store.audit(
+      `admin:${request.admin.email}`,
+      "memory.clear",
+      `${body.botId}:${body.groupId}:${body.userId}`,
+      { deleted },
+    );
+    return { ok: true, data: { deleted } };
+  });
+
+  app.post("/api/persona/preview", async (request: any) => {
+    const body = z
+      .object({
+        botId: z.string().min(1),
+        groupId: z.string().optional().default(""),
+        userId: z.string().optional().default(""),
+        message: z.string().trim().min(1).max(4000),
+        technical: z.boolean().default(false),
+        defaults: groupPolicySettingsSchema.optional(),
+      })
+      .parse(request.body);
+    const bot = store.db
+      .prepare("SELECT * FROM bots WHERE id=?")
+      .get(body.botId) as any;
+    if (!bot)
+      throw Object.assign(new Error("机器人不存在"), { statusCode: 404 });
+    const baseDefaults = {
+      ...botDefaultsFallback,
+      ...store.getSetting<Partial<BotDefaults>>("bot_defaults", {}),
+    };
+    const policy = body.groupId
+      ? store.getGroupPolicy(body.botId, body.groupId)
+      : null;
+    const defaults = {
+      ...baseDefaults,
+      ...(policy?.settings || {}),
+      ...(body.defaults || {}),
+    } as BotDefaults;
+    const memories = body.groupId && body.userId
+      ? store.listUserMemories({
+          botId: body.botId,
+          groupId: body.groupId,
+          userId: body.userId,
+          limit: 12,
+        })
+      : [];
+    const compiled = compilePersona({
+      bot,
+      defaults,
+      groupMode: normalizeGroupMode(policy?.mode),
+      groupPersona: policy?.persona_override,
+      modePrompt: body.technical ? defaults.techPrompt : undefined,
+      memories,
+    });
+    const started = Date.now();
+    const result = await pool.chat(
+      [
+        { role: "system", content: compiled.prompt },
+        { role: "user", content: body.message },
+      ],
+      "text",
+      {
+        botId: body.botId,
+        groupId: body.groupId || undefined,
+        kind: "persona_preview",
+      },
+    );
+    return {
+      ok: true,
+      data: {
+        reply: result.text,
+        providerId: result.providerId,
+        latencyMs: Number((result as any).latencyMs || Date.now() - started),
+        layers: compiled.layers.map((layer) => ({
+          key: layer.key,
+          label: layer.label,
+          characters: layer.content.length,
+        })),
+      },
+    };
+  });
+
+  app.get("/api/persona/versions", async () => ({
+    ok: true,
+    data: store.listPersonaVersions(),
+  }));
+  app.post("/api/persona/versions", async (request: any) => {
+    const body = z.object({ note: z.string().max(200).default("") }).parse(request.body);
+    const config = store.getSetting("bot_defaults", botDefaultsFallback);
+    const id = store.savePersonaVersion(config, body.note);
+    store.audit(`admin:${request.admin.email}`, "persona.version.save", id);
+    return { ok: true, data: { id } };
+  });
+  app.post("/api/persona/versions/:id/restore", async (request: any) => {
+    const id = z.string().parse(request.params.id);
+    const config = store.getPersonaVersion(id);
+    if (!config)
+      throw Object.assign(new Error("人格版本不存在"), { statusCode: 404 });
+    store.setSetting("bot_defaults", config);
+    store.audit(`admin:${request.admin.email}`, "persona.version.restore", id);
+    return { ok: true };
+  });
+}
+
 function registerDiagnosticRoutes(app: any, store: Store) {
   app.get("/api/diagnostics", async (request: any) => {
     const query = z
@@ -1120,6 +1346,11 @@ function registerSettingsRoutes(app: any, store: Store) {
           activeStartHour: z.number().int().min(0).max(23),
           activeEndHour: z.number().int().min(1).max(24),
           activeTimezone: z.string().min(1).max(100),
+          humorLevel: z.number().int().min(1).max(5),
+          initiativeLevel: z.number().int().min(1).max(5),
+          directnessLevel: z.number().int().min(1).max(5),
+          technicalDepth: z.number().int().min(1).max(5),
+          answerLength: z.number().int().min(1).max(5),
         })
         .parse(value);
     }

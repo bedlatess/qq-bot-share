@@ -87,10 +87,22 @@ try {
   await page.getByRole("button", { name: /机器人设置/ }).click();
   await page.getByRole("heading", { name: "机器人设置" }).waitFor();
   await page.getByRole("button", { name: "人格与节奏" }).click();
-  await page.getByRole("heading", { name: "全局人格默认值" }).waitFor();
+  await page.getByRole("heading", { name: "全局人格与回复节奏" }).waitFor();
   await page.getByText("启用冷场自动活跃", { exact: true }).waitFor();
   await page.screenshot({
     path: `${output}/settings-persona-desktop.png`,
+    fullPage: true,
+  });
+  await page.getByRole("button", { name: "人格调试" }).click();
+  await page.getByRole("heading", { name: "人格调试室" }).waitFor();
+  await page.screenshot({
+    path: `${output}/settings-persona-lab-desktop.png`,
+    fullPage: true,
+  });
+  await page.getByRole("button", { name: "记忆管理" }).click();
+  await page.getByRole("heading", { name: "结构化长期记忆" }).waitFor();
+  await page.screenshot({
+    path: `${output}/settings-memories-desktop.png`,
     fullPage: true,
   });
   await page.getByRole("button", { name: "自定义命令" }).click();
@@ -115,6 +127,17 @@ try {
     () => document.documentElement.scrollWidth > window.innerWidth + 1,
   );
   if (logsOverflow) throw new Error("logs layout has horizontal overflow");
+  await page.getByRole("button", { name: /群行为/ }).click();
+  await page.getByRole("heading", { name: "群行为", exact: true }).waitFor();
+  await page.getByRole("heading", { name: "群行为策略" }).waitFor();
+  await page.screenshot({
+    path: `${output}/group-behavior-desktop.png`,
+    fullPage: true,
+  });
+  const groupOverflow = await page.evaluate(
+    () => document.documentElement.scrollWidth > window.innerWidth + 1,
+  );
+  if (groupOverflow) throw new Error("group behavior layout has horizontal overflow");
   await page.getByRole("button", { name: /消息诊断/ }).click();
   await page.getByRole("heading", { name: "消息诊断" }).waitFor();
   await page.getByRole("heading", { name: "消息处理轨迹" }).waitFor();
@@ -160,8 +183,11 @@ try {
       screenshots: [
         `${output}/dashboard-desktop.png`,
         `${output}/settings-persona-desktop.png`,
+        `${output}/settings-persona-lab-desktop.png`,
+        `${output}/settings-memories-desktop.png`,
         `${output}/settings-custom-commands-desktop.png`,
         `${output}/logs-desktop.png`,
+        `${output}/group-behavior-desktop.png`,
         `${output}/diagnostics-desktop.png`,
         `${output}/diagnostics-mobile.png`,
         `${output}/settings-mobile.png`,

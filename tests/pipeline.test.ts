@@ -124,6 +124,12 @@ test("disabled proactive replies leave a final diagnostic instead of a queued tr
       "bot_defaults",
       engagementSettings({ lurkEnabled: false }),
     );
+    fixture.store.setGroupPolicy({
+      botId: "bot_1",
+      groupId: "group_1",
+      mode: "quiet",
+      settings: { lurkEnabled: false },
+    });
     const pipeline = new EventPipeline(
       fixture.store,
       { sendAction: () => undefined } as any,
