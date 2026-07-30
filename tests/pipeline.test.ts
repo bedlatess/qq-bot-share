@@ -79,7 +79,7 @@ test("authorized group activity triggers a quota-bound proactive reply", async (
       cooldownMs: 0,
       maxHistory: 10,
       lurkEnabled: true,
-      lurkMinMessages: 2,
+      lurkMinMessages: 1,
       lurkQuietSeconds: 3,
       lurkIntervalSeconds: 30,
     });
@@ -94,7 +94,7 @@ test("authorized group activity triggers a quota-bound proactive reply", async (
     const moderator = new Moderator(fixture.store, pool);
     const pipeline = new EventPipeline(fixture.store, hub, pool, moderator);
     const started = Date.now();
-    for (let index = 0; index < 2; index += 1) {
+    for (let index = 0; index < 1; index += 1) {
       await pipeline.enqueue("bot_1", `event_${index}`, {
         post_type: "message",
         message_type: "group",
@@ -105,7 +105,7 @@ test("authorized group activity triggers a quota-bound proactive reply", async (
         sender: { nickname: `成员${index + 1}`, role: "member" },
       });
     }
-    await pipeline.tick(started + 5_001);
+    await pipeline.tick(started + 4_000);
     assert.equal(actions.length, 1);
     assert.equal(actions[0].action, "send_group_msg");
     assert.equal(actions[0].params.message, "自然插话");
@@ -386,25 +386,25 @@ test("idle engagement sends twice, becomes dormant, and wakes on human activity"
 
     await pipeline.tick(started + 59_999);
     assert.equal(actions.length, 0);
-    await pipeline.tick(started + 60_001);
+    await pipeline.tick(started + 70_001);
     assert.equal(actions.length, 1);
     assert.equal(
       fixture.store.getGroupEngagement("bot_1", "group_1")?.idle_attempts,
       1,
     );
-    await pipeline.tick(started + 120_002);
+    await pipeline.tick(started + 140_002);
     assert.equal(actions.length, 2);
     assert.equal(
       fixture.store.getGroupEngagement("bot_1", "group_1")?.dormant,
       1,
     );
-    await pipeline.tick(started + 180_003);
+    await pipeline.tick(started + 210_003);
     assert.equal(actions.length, 2);
 
     fixture.store.recordHumanActivity(
       "bot_1",
       "group_1",
-      new Date(started + 180_004),
+      new Date(started + 210_004),
     );
     const restored = fixture.store.getGroupEngagement("bot_1", "group_1");
     assert.equal(restored?.idle_attempts, 0);

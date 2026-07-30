@@ -100,6 +100,7 @@ export class EventPipeline {
   >();
   private scheduler?: NodeJS.Timeout;
   private ticking = false;
+  private lastIdleTick = 0;
 
   constructor(
     private readonly store: Store,
@@ -112,7 +113,7 @@ export class EventPipeline {
 
   start() {
     if (this.scheduler) return;
-    this.scheduler = setInterval(() => void this.tick(), 10000);
+    this.scheduler = setInterval(() => void this.tick(), 2000);
     this.scheduler.unref();
   }
 
@@ -149,7 +150,10 @@ export class EventPipeline {
       this.pruneCaches(now);
       const defaults = this.defaults();
       await this.tickRecentActivity(now, defaults);
-      await this.tickIdleGroups(now, defaults);
+      if (now - this.lastIdleTick >= 10000) {
+        this.lastIdleTick = now;
+        await this.tickIdleGroups(now, defaults);
+      }
     } finally {
       this.ticking = false;
     }
@@ -158,10 +162,10 @@ export class EventPipeline {
   private async tickRecentActivity(now: number, defaults: BotDefaults) {
     if (!defaults.lurkEnabled) return;
     for (const activity of this.activities.values()) {
-      if (activity.messages.length < Math.max(2, defaults.lurkMinMessages || 2))
+      if (activity.messages.length < Math.max(1, defaults.lurkMinMessages || 1))
         continue;
       const quietFor = now - activity.lastAt;
-      const quietThreshold = Math.max(2, defaults.lurkQuietSeconds || 5) * 1000;
+      const quietThreshold = Math.max(1, defaults.lurkQuietSeconds || 3) * 1000;
       if (quietFor < quietThreshold || quietFor > 5 * 60 * 1000) continue;
       const interval = Math.max(30, defaults.lurkIntervalSeconds || 45) * 1000;
       if (activity.lastSpoke > 0 && now - activity.lastSpoke < interval)
@@ -892,8 +896,8 @@ export class EventPipeline {
     return {
       ...value,
       lurkEnabled: value.lurkEnabled !== false,
-      lurkMinMessages: integer(value.lurkMinMessages, 2, 2, 20),
-      lurkQuietSeconds: integer(value.lurkQuietSeconds, 5, 2, 60),
+      lurkMinMessages: integer(value.lurkMinMessages, 1, 1, 20),
+      lurkQuietSeconds: integer(value.lurkQuietSeconds, 3, 1, 60),
       lurkIntervalSeconds: integer(value.lurkIntervalSeconds, 45, 30, 3600),
       idleEnabled: value.idleEnabled !== false,
       idleAfterMinutes: integer(value.idleAfterMinutes, 30, 1, 1440),
